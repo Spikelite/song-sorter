@@ -5,4 +5,4 @@ _plan
 .cache
 .pytest_cache
 
-venv
+venv.venv/
