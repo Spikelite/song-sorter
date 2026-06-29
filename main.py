@@ -1,5 +1,7 @@
 """song-sorter: Interactive CLI for organizing karaoke track libraries."""
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
 from typing import Iterable
