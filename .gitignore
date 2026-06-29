@@ -6,3 +6,4 @@ _plan
 .pytest_cache
 
 venv
+.venv/

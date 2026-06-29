@@ -1,5 +1,7 @@
 """Extract details from karaoke tracks (CDG, MP3, ZIP)."""
 
+from __future__ import annotations
+
 import hashlib
 from sys import exc_info
 import zipfile
