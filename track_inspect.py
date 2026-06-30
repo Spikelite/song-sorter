@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from sys import exc_info
+import zipfile_deflate64 as zipfile   # adds Deflate64 (method 9); supersets stdlib zipfile
 import zipfile
 from io import BytesIO
 from pathlib import Path

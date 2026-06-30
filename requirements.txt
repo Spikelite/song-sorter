@@ -2,3 +2,4 @@ questionary>=2.1.1
 pytest>=7.0.0
 rapidfuzz>=3.12,<3.14
 mutagen>=1.47.0
+zipfile-deflate64>=0.2.0
