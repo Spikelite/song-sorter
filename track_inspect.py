@@ -8,6 +8,7 @@ import zipfile_deflate64 as zipfile   # adds Deflate64 (method 9); supersets std
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from tqdm import tqdm
 
 from mutagen.mp3 import MP3
 
@@ -116,7 +117,7 @@ def track_details(path: str | Path) -> dict[str, str]:
                     # cdg_size=cdg_size, mp3_size=mp3_size
                 )
         except Exception as e:
-            print(f"\nfailed to read {p} :: {e}")
-            return { "error": str(e)}
+            tqdm.write(f"failed to read {p} :: {e}")   # was: print(f"\nfailed to read {p} :: {e}")
+            return {"error": str(e)}
 
     return {}

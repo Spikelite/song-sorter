@@ -11,6 +11,8 @@ from questionary import Choice
 
 import rapidfuzz
 
+from tqdm import tqdm
+
 from track import Track, TrackStore
 from track_index import ArtistIndex, SongIndex, TrackIndex, IndexNode, clean_artist, clean_song
 from track_inspect import track_details
@@ -64,9 +66,8 @@ def add_tracks(store: TrackStore, root: Path) -> None:
     """Walk root for .zip and .cdg files and add them to the track store."""
     added = 0
 
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
+    files = [p for p in root.rglob("*") if p.is_file()]
+    for p in tqdm(files, desc="Scanning", unit="file"):
         stem = p.stem
         artist, song = _parse_artist_song(stem)
         track = None
@@ -85,34 +86,26 @@ def add_tracks(store: TrackStore, root: Path) -> None:
         elif p.suffix.lower() == ".cdg":
             mp3_path = p.with_suffix(".mp3")
             file_types = ["mp3", "cdg"] if mp3_path.exists() else ["cdg"]
-            
+
             track = Track(
                 path=str(p.resolve()),
                 file_types=file_types,
                 artist=artist or "Unknown",
                 song=song,
             )
-        
+
         if track is not None:
             store.add(track)
             added += 1
-            if added % 10 == 0:
-                print(".", end="")
 
     print(f"\nAdded {added} track(s).")
 
 def add_details(store: TrackStore, root: Path) -> None:
     """ Modifies track metadata, to include size and mp3 metadata. """
     added = 0
-    skipped = 0
 
-    for p in root.rglob("*"):
-        if not p.is_file():
-            skipped += 1
-            if skipped % 10 == 0:
-                print(":", end=":")
-            continue
-
+    files = [p for p in root.rglob("*") if p.is_file()]
+    for p in tqdm(files, desc="Details", unit="file"):
         tpath = str(p.resolve())
         track = store.get(tpath)
 
@@ -123,9 +116,6 @@ def add_details(store: TrackStore, root: Path) -> None:
             details = track_details(p)
             track.metadata.update(details)
             added += 1
-
-            if added % 10 == 0:
-                print(".", end="")
 
     print(f"\nAdded {added} track(s).")
 
