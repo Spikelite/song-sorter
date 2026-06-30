@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
@@ -101,41 +103,73 @@ def add_tracks(store: TrackStore, root: Path) -> None:
 
     print(f"\nAdded {added} track(s).")
 
-def add_details(store: TrackStore, root: Path) -> None:
+def add_details(store: TrackStore, root: Path, workers: int = 4,
+                checkpoint_seconds: int = 300) -> None:
     """ Modifies track metadata, to include size and mp3 metadata.
 
     Delta cache: a track is skipped when its source file is unchanged since
     it was last detailed (same size + mtime), so a re-run only touches new
-    or modified files. Progress is persisted on exit, so a quit partway
-    through resumes from where it left off. Delete the cache to force a
-    full re-detail (e.g. after changing how details are extracted)."""
+    or modified files. The store is checkpointed (atomically) every
+    checkpoint_seconds and once at the end, so even a hard kill resumes from
+    the last checkpoint. Delete the cache to force a full re-detail (e.g.
+    after changing how details are extracted).
+
+    Detailing runs in a thread pool: track_details is pure, and its heavy
+    work (file I/O, decompression, hashing) releases the GIL. On a single
+    spinning disk a small worker count (2-4) overlaps CPU with I/O; more
+    just causes seek thrashing. Tune `workers` to benchmark your disk."""
     added = 0
     skipped = 0
 
+    # Phase 1 (main thread): decide what actually needs detailing.
     # Sorted for seek-friendly ordering on a single spinning disk.
     files = sorted(p for p in root.rglob("*") if p.is_file())
-    for p in tqdm(files, desc="Details", unit="file"):
-        tpath = str(p.resolve())
-        track = store.get(tpath)
+    todo = []  # (path, track, sig_mtime, sig_size)
+    for p in tqdm(files, desc="Scanning", unit="file"):
+        track = store.get(str(p.resolve()))
         if track is None:
             continue
-
-        stat = p.stat()
-        sig_mtime = str(int(stat.st_mtime))
-        sig_size = str(stat.st_size)
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        sig_mtime = str(int(st.st_mtime))
+        sig_size = str(st.st_size)
 
         # Skip if already detailed and the source file hasn't changed.
         if (track.metadata.get("src_mtime") == sig_mtime
                 and track.metadata.get("src_size") == sig_size):
             skipped += 1
             continue
+        todo.append((p, track, sig_mtime, sig_size))
 
-        details = track_details(p)
-        details["src_mtime"] = sig_mtime
-        details["src_size"] = sig_size
-        track.metadata.update(details)
-        added += 1
+    # Phase 2: detail in parallel; apply results in the main thread so the
+    # store stays single-writer (no locking needed). Sorted submission order
+    # keeps the few in-flight reads spatially close on the disk.
+    last_save = time.monotonic()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(track_details, p): (track, sig_mtime, sig_size)
+                   for (p, track, sig_mtime, sig_size) in todo}
+        for fut in tqdm(as_completed(futures), total=len(futures),
+                        desc="Details", unit="file"):
+            track, sig_mtime, sig_size = futures[fut]
+            try:
+                details = fut.result()
+            except Exception as e:
+                tqdm.write(f"detail failed {track.path} :: {e}")
+                continue
+            details["src_mtime"] = sig_mtime
+            details["src_size"] = sig_size
+            track.metadata.update(details)
+            added += 1
 
+            # Periodic atomic checkpoint: a hard kill mid-run then only loses
+            # the last <checkpoint_seconds of work instead of everything.
+            if time.monotonic() - last_save >= checkpoint_seconds:
+                store.save(_CACHE_PATH)
+                last_save = time.monotonic()
+
+    store.save(_CACHE_PATH)  # final checkpoint once detailing completes
     print(f"\nAdded {added} track(s), skipped {skipped} unchanged.")
 
 def _format_metadata(metadata: dict[str, str]) -> str:
