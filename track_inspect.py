@@ -6,6 +6,7 @@ import hashlib
 from sys import exc_info
 import zipfile_deflate64 as zipfile   # adds Deflate64 (method 9); supersets stdlib zipfile
 import zipfile
+import zlib
 from io import BytesIO
 from pathlib import Path
 from tqdm import tqdm
@@ -16,6 +17,14 @@ from mutagen.mp3 import MP3
 def _compute_hash(data: bytes) -> str:
     """Compute SHA-256 hash of data, hex-encoded."""
     return hashlib.sha256(data).hexdigest()
+
+def _read_member_raw(zf, name):
+    info = zf.getinfo(name)
+    with zf.open(info) as raw:
+        comp = raw._fileobj.read(info.compress_size)   # raw compressed bytes
+    if info.compress_type == zipfile.ZIP_STORED:
+        return comp
+    return zlib.decompressobj(-15).decompress(comp)     # raw deflate, no CRC
 
 
 def _mp3_info(data: bytes) -> dict[str, str]:
@@ -108,16 +117,33 @@ def track_details(path: str | Path) -> dict[str, str]:
 
                 cdg_member = stems["cdg"]
                 mp3_member = stems["mp3"]
-                mp3_data = zf.read(mp3_member)
-                cdg_data = zf.read(cdg_member)
+                mp3_data, mp3_ok = _read_member(zf, mp3_member)
+                cdg_data, cdg_ok = _read_member(zf, cdg_member)
                 # cdg_size = zf.getinfo(cdg_member).file_size
                 # mp3_size = zf.getinfo(mp3_member).file_size
                 return _details_from_pair(
                     cdg_data, mp3_data,
                     # cdg_size=cdg_size, mp3_size=mp3_size
                 )
+        except NotImplementedError as e:
+            # Unsupported compression method (something even deflate64 can't handle)
+            tqdm.write(f"unsupported compression {p} :: {e}")
+            return {"error": f"unsupported compression: {e}"}
+
+        except zipfile.BadZipFile as e:
+            # Structural damage: bad central directory / truncated archive.
+            # (Per-member CRC failures are salvaged in _read_member, not here.)
+            tqdm.write(f"corrupt archive {p} :: {e}")
+            return {"error": f"bad zip: {e}"}
+
+        except zlib.error as e:
+            # Compressed stream can't be inflated — the "Error -3" family.
+            tqdm.write(f"corrupt data {p} :: {e}")
+            return {"error": f"decompress failed: {e}"}
+
         except Exception as e:
-            tqdm.write(f"failed to read {p} :: {e}")   # was: print(f"\nfailed to read {p} :: {e}")
+            # Anything unforeseen — keep a catch-all so nothing slips through.
+            tqdm.write(f"failed to read {p} :: {e}")
             return {"error": str(e)}
 
     return {}
