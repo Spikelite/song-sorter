@@ -55,6 +55,17 @@ The interactive menu (`python main.py`) operates on a persistent track store
   tracks) one at a time. For each you can mark **ok**, **swap** artist/song,
   **edit** fields, or **auto-clean** the artist. Decisions are saved to a
   persistent review state and reapplied to identical entries within a session.
+- **Tag-review** — Automatically mark review tracks **ok** when the parsed
+  artist is corroborated by the MP3's ID3 `tag_artist` (matched ignoring word
+  order, catalog prefixes, karaoke suffixes, and `&`/`and`/`feat`). Clears the
+  large "parse was already right" portion of the queue. Non-destructive — only
+  writes the review-state flag.
+- **Tag-swap** — Fix reversed parses using the tag as evidence: when
+  `tag_artist` matches the **song** field (not the artist) and that value is a
+  known artist (≥3 tracks) while the current artist is not, swap artist/song
+  and mark reviewed. The known-artist check guards against mislabeled tags
+  (e.g. Disney tracks whose ID3 artist is the song title), which are left for
+  manual review.
 - **Fixup** — Browse only the not-yet-reviewed tracks from thin artists,
   grouped by artist, for editing.
 - **Fix-artist** — Browse all artists; drilling into one lets you **bulk

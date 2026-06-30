@@ -743,6 +743,88 @@ def _auto_clean_artist(artist: str) -> tuple[str, str]:
     return prefix, feature
 
 
+# Catalog-id prefix that sometimes leads an ID3 tag, e.g. "SFDU11-06 - ".
+_CATALOG_PREFIX_RE = re.compile(r"^[A-Za-z]{2,}\d+[-\d]*\s*-\s*")
+# Karaoke noise that appears inside artist / tag strings.
+_ARTIST_NOISE_RE = re.compile(
+    r"\(.*?\)|\bw[\s-]?o?b?gv\b|\bwvocals?\b|\bmultiplex\b|\bvr\b", re.IGNORECASE
+)
+
+
+def _artist_tokens(s: str) -> frozenset:
+    """Order-insensitive, normalized token set for comparing an artist to a tag.
+
+    Strips a leading catalog id and karaoke noise, and treats &/and/feat as
+    joiners, so 'Murray, Pete' == 'Pete Murray' and 'A & B' == 'A And B'."""
+    s = _CATALOG_PREFIX_RE.sub("", s or "")
+    s = _ARTIST_NOISE_RE.sub(" ", s)
+    s = re.sub(r"\b(feat|ft|featuring|and)\b", " ", s, flags=re.IGNORECASE).replace("&", " ")
+    s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    return frozenset(w for w in s.split() if w)
+
+
+def auto_ok_from_tags(store: TrackStore) -> None:
+    """Mark review-eligible tracks 'ok' when the parsed artist is corroborated
+    by the MP3's ID3 tag_artist.
+
+    Non-destructive: only writes the review-state flag (reversible by deleting
+    review-state.json). Tracks with no tag, or a tag whose tokens genuinely
+    differ, are left untouched for manual review. Matching is order-insensitive
+    and ignores catalog prefixes, karaoke suffixes, and &/and/feat variations."""
+    review_state = ReviewState()
+    review_state.load(_REVIEW_STATE_PATH)
+
+    okayed = 0
+    for t in _tracks_to_review(store, review_state):
+        tag = t.metadata.get("tag_artist")
+        if not tag or tag == "<not-found>":
+            continue
+        a = _artist_tokens(t.artist)
+        g = _artist_tokens(tag)
+        if a and a == g:
+            review_state.set(t.path, "ok")
+            okayed += 1
+
+    review_state.save(_REVIEW_STATE_PATH)
+    questionary.print(f"Auto-ok'd {okayed} tracks corroborated by their ID3 tag")
+
+
+def swap_from_tags(store: TrackStore) -> None:
+    """Fix reversed artist/song parses using the ID3 tag as evidence.
+
+    When tag_artist matches the SONG field (not the artist), and that song
+    value is a known artist (>=3 tracks) while the current artist is not, the
+    parser reversed the two -- swap them and mark reviewed.
+
+    The known-artist check guards against mislabeled tags (e.g. Disney tracks
+    whose ID3 'artist' is actually the song title); those are left for manual
+    review rather than swapped."""
+    index = ArtistIndex.from_store(store)
+    known = set(index.count_artists(low_bound=3))
+
+    review_state = ReviewState()
+    review_state.load(_REVIEW_STATE_PATH)
+
+    swapped = 0
+    for t in _tracks_to_review(store, review_state):
+        tag = t.metadata.get("tag_artist")
+        if not tag or tag == "<not-found>":
+            continue
+        tg, ar, so = _artist_tokens(tag), _artist_tokens(t.artist), _artist_tokens(t.song)
+        if not tg or not so or tg != so or tg == ar:
+            continue
+        # Tag points at the song field. Only trust it if that value is a real
+        # artist elsewhere and the current artist is not (guards bad tags).
+        if clean_artist(t.song) in known and clean_artist(t.artist) not in known:
+            t.artist, t.song = t.song, t.artist
+            store.add(t)
+            review_state.set(t.path, "ok")
+            swapped += 1
+
+    review_state.save(_REVIEW_STATE_PATH)
+    questionary.print(f"Swapped {swapped} reversed artist/song pairs (corroborated by ID3 tag)")
+
+
 def review_mode(store: TrackStore) -> None:
     """Sequential review of tracks from artists with three or fewer tracks."""
     review_state = ReviewState()
@@ -1184,6 +1266,8 @@ def run_interactive(store: TrackStore) -> None:
         "final-final",
         "list",
         "review",
+        "tag-review",
+        "tag-swap",
         "fixup",
         "fix-artist",
         "fix-unknown",
@@ -1233,6 +1317,10 @@ def run_interactive(store: TrackStore) -> None:
             report_track_count(store)
         elif result == "review":
             review_mode(store)
+        elif result == "tag-review":
+            auto_ok_from_tags(store)
+        elif result == "tag-swap":
+            swap_from_tags(store)
         elif result == "fixup":
             browse_fixup(store)
         elif result == "fix-artist":
