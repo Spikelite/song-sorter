@@ -12,6 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from mutagen.mp3 import MP3
+from mutagen.easyid3 import EasyID3
 
 
 def _compute_hash(data: bytes) -> str:
@@ -45,6 +46,42 @@ def _mp3_info(data: bytes) -> dict[str, str]:
         return {}
 
 
+# Sentinel for a tag we looked for but didn't find. Keeps the metadata
+# schema deterministic: every tag_* key is ALWAYS present on every track.
+TAG_NOT_FOUND = "<not-found>"
+
+# Our metadata key -> EasyID3 field name.
+_TAG_FIELDS = {
+    "tag_artist": "artist",
+    "tag_title": "title",
+    "tag_album": "album",
+    "tag_year": "date",
+    "tag_genre": "genre",
+}
+
+
+def _mp3_tags(data: bytes) -> dict[str, str]:
+    """Read ID3 tags from MP3 bytes.
+
+    Always returns all five tag_* keys. Any tag that is absent — or an MP3
+    that can't be parsed / has no ID3 header — yields TAG_NOT_FOUND for that
+    key, so the output schema is identical for every track."""
+    out = {key: TAG_NOT_FOUND for key in _TAG_FIELDS}
+    try:
+        audio = MP3(BytesIO(data), ID3=EasyID3)
+    except Exception:
+        return out  # unreadable MP3 / no ID3 header — all keys stay NOT_FOUND
+    if audio.tags is None:
+        return out
+    for out_key, easy_key in _TAG_FIELDS.items():
+        values = audio.tags.get(easy_key)
+        if values:
+            value = str(values[0]).strip()
+            if value:
+                out[out_key] = value
+    return out
+
+
 def _details_from_pair(
     cdg_data: bytes,
     mp3_data: bytes,
@@ -61,6 +98,7 @@ def _details_from_pair(
 
     mp3_info = _mp3_info(mp3_data)
     out.update(mp3_info)
+    out.update(_mp3_tags(mp3_data))   # always adds the five tag_* keys
 
     return out
 
