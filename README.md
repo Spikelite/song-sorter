@@ -73,6 +73,14 @@ The interactive menu (`python main.py`) operates on a persistent track store
   and mark reviewed. The known-artist check guards against mislabeled tags
   (e.g. Disney tracks whose ID3 artist is the song title), which are left for
   manual review.
+- **Musicbrainz** *(online)* — Last-resort corroboration for tracks with no
+  usable tag. Queries MusicBrainz by artist + title (and the reversed
+  orientation, to catch swapped parses): a confident match marks the track
+  **ok** (swapping if needed); a record that exists but diverges far from our
+  data is flagged in metadata (`mb_artist`/`mb_title`) for review rather than
+  applied; no match is left for manual review. **Offline-safe** — it skips
+  cleanly without internet, is rate-limited and cached/resumable, and is never
+  part of an offline batch.
 - **Fixup** — Browse only the not-yet-reviewed tracks from thin artists,
   grouped by artist, for editing.
 - **Fix-artist** — Browse all artists; drilling into one lets you **bulk
@@ -98,6 +106,10 @@ The interactive menu (`python main.py`) operates on a persistent track store
   such tracks in the same folder agree.
 - **Uncomma** — Convert `"Last, First"` artist names to `"First Last"` when
   the swapped form matches a known artist.
+- **Trailing-article** — Move a trailing article to the front in artist and
+  song fields (`"Models, The"` → `"The Models"`, `"Whole New World, A"` →
+  `"A Whole New World"`). Deterministic — only fires when a field *ends* in
+  `", The/A/An"`, so multi-comma names like `"Earth, Wind & Fire"` are untouched.
 - **Ungroup** — For `"Artist & Someone & Else"`, keep the primary artist and
   move the trailing collaborators into a `feature` field.
 - **Fuzz** — Merge near-duplicate **artist** spellings (fuzzy ratio ≥ 90),

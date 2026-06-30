@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
+import socket
 import time
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
@@ -825,6 +829,155 @@ def swap_from_tags(store: TrackStore) -> None:
     questionary.print(f"Swapped {swapped} reversed artist/song pairs (corroborated by ID3 tag)")
 
 
+_MB_USER_AGENT = "song-sorter/1.0 ( https://github.com/Spikelite/song-sorter )"
+_MB_URL = "https://musicbrainz.org/ws/2/recording"
+_MB_STRONG = 88   # both sims >= this: confident, low-divergence match -> ok
+_MB_WEAK = 70     # both sims >= this (but not strong): a record exists, diverges -> flag
+
+
+def _is_online(host: str = "musicbrainz.org", port: int = 443, timeout: float = 3.0) -> bool:
+    """Quick reachability probe so online features self-skip when offline."""
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+def _mb_escape(s: str) -> str:
+    # We wrap the value in a Lucene quoted phrase, so just drop " and \.
+    return s.replace("\\", " ").replace('"', " ").strip()
+
+
+def _mb_credit_name(artist_credit) -> str:
+    """Flatten a MusicBrainz artist-credit list into a display string."""
+    parts = []
+    for c in artist_credit or []:
+        if isinstance(c, dict):
+            parts.append(c.get("name") or c.get("artist", {}).get("name", ""))
+            parts.append(c.get("joinphrase", ""))
+    return "".join(parts).strip()
+
+
+def _mb_search(artist: str, title: str) -> list:
+    """Query MusicBrainz for recordings matching artist+title.
+
+    Raises on network error so the caller can handle connectivity loss."""
+    q = f'artist:"{_mb_escape(artist)}" AND recording:"{_mb_escape(title)}"'
+    url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "5"})
+    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.load(resp).get("recordings", [])
+
+
+def _mb_best(recordings: list, our_artist: str, our_title: str) -> tuple:
+    """Return the best (artist_sim, title_sim, mb_artist, mb_title) match.
+
+    token_sort_ratio is order-insensitive, so 'Murray, Pete' scores 100 against
+    'Pete Murray'."""
+    best = (0.0, 0.0, "", "")
+    for r in recordings:
+        mb_title = r.get("title", "")
+        mb_artist = _mb_credit_name(r.get("artist-credit"))
+        a = rapidfuzz.fuzz.token_sort_ratio(our_artist, mb_artist)
+        t = rapidfuzz.fuzz.token_sort_ratio(our_title, mb_title)
+        if a + t > best[0] + best[1]:
+            best = (a, t, mb_artist, mb_title)
+    return best
+
+
+def musicbrainz_lookup(store: TrackStore) -> None:
+    """(online) Corroborate remaining review tracks against MusicBrainz.
+
+    For each unreviewed track from a thin artist, query MusicBrainz by
+    artist+title (and the swapped orientation, to catch reversed parses):
+      - confident match (both fields very similar) -> mark ok
+      - only the swapped orientation matches -> swap artist/song, mark ok
+      - a record exists but diverges a lot from our data -> flag in metadata
+        (mb_artist/mb_title) for review; do NOT auto-apply
+      - no match -> left for manual review
+
+    Results are cached (metadata['mb_checked']) so it is resumable, and it is
+    OFFLINE-SAFE: skips cleanly with no internet and never aborts hard."""
+    if not _is_online():
+        questionary.print("MusicBrainz lookup needs internet -- skipped (offline).")
+        return
+
+    review_state = ReviewState()
+    review_state.load(_REVIEW_STATE_PATH)
+    todo = [t for t in _tracks_to_review(store, review_state)
+            if not t.metadata.get("mb_checked")]
+    if not todo:
+        questionary.print("No un-checked review tracks for MusicBrainz.")
+        return
+
+    okd = swapped = flagged = nomatch = 0
+    pair_cache: dict[tuple, tuple] = {}
+    consecutive_fail = 0
+    last_save = time.monotonic()
+
+    try:
+        for t in tqdm(todo, desc="MusicBrainz", unit="track"):
+            a, s = t.artist.strip(), t.song.strip()
+            if not a or not s:
+                continue
+            key = (a.lower(), s.lower())
+            try:
+                if key in pair_cache:
+                    na, nt, ma, mt, was_swap = pair_cache[key]
+                else:
+                    res = _mb_search(a, s)
+                    time.sleep(1.1)  # MusicBrainz: ~1 req/sec
+                    na, nt, ma, mt = _mb_best(res, a, s)
+                    was_swap = False
+                    if not (na >= _MB_STRONG and nt >= _MB_STRONG):
+                        # Try the reversed orientation to catch swapped parses.
+                        res2 = _mb_search(s, a)
+                        time.sleep(1.1)
+                        sa, st_, sma, smt = _mb_best(res2, s, a)
+                        if sa >= _MB_STRONG and st_ >= _MB_STRONG:
+                            na, nt, ma, mt, was_swap = sa, st_, sma, smt, True
+                    pair_cache[key] = (na, nt, ma, mt, was_swap)
+                consecutive_fail = 0
+            except Exception:
+                consecutive_fail += 1
+                if consecutive_fail >= 5:
+                    tqdm.write("Lost connection to MusicBrainz -- saving progress and stopping.")
+                    break
+                continue  # transient error: leave un-checked, retry next run
+
+            t.metadata["mb_checked"] = "1"
+            if na >= _MB_STRONG and nt >= _MB_STRONG:
+                if was_swap:
+                    t.artist, t.song = t.song, t.artist
+                    store.add(t)
+                    swapped += 1
+                review_state.set(t.path, "ok")
+                t.metadata["mb_match"] = "swap" if was_swap else "ok"
+                okd += 1
+            elif na >= _MB_WEAK and nt >= _MB_WEAK:
+                # A recording exists but diverges -- keep for review, don't apply.
+                t.metadata["mb_match"] = "flag"
+                t.metadata["mb_artist"] = ma
+                t.metadata["mb_title"] = mt
+                flagged += 1
+            else:
+                t.metadata["mb_match"] = "none"
+                nomatch += 1
+
+            if time.monotonic() - last_save >= 60:
+                store.save(_CACHE_PATH)
+                review_state.save(_REVIEW_STATE_PATH)
+                last_save = time.monotonic()
+    finally:
+        store.save(_CACHE_PATH)
+        review_state.save(_REVIEW_STATE_PATH)
+
+    questionary.print(
+        f"MusicBrainz: ok'd {okd} (incl {swapped} swapped), "
+        f"flagged {flagged}, no-match {nomatch}")
+
+
 def review_mode(store: TrackStore) -> None:
     """Sequential review of tracks from artists with three or fewer tracks."""
     review_state = ReviewState()
@@ -1083,6 +1236,39 @@ def fill_artist_from_tags(store: TrackStore) -> None:
     questionary.print(f"Filled {filled} artists from tags; flagged {flagged} for review")
 
 
+# Prefix is comma-free so this only matches a SINGLE name ending in an article.
+_TRAILING_ARTICLE_RE = re.compile(r"^([^,]*\S),\s*(the|a|an)\s*$", re.IGNORECASE)
+
+
+def _fix_trailing_article(s: str) -> str:
+    """'Beatles, The' -> 'The Beatles'. Conservative: only fires for a single
+    clean name/title -- it must have no other comma and no dash. That leaves
+    mashed artist-song blobs ('Dion, Celine-Power Of Love, The', 'Ace Of
+    Base-Sign, The') and multi-comma names ('Earth, Wind & Fire') untouched, at
+    the cost of skipping a few real hyphenated names (handled later by MB)."""
+    m = _TRAILING_ARTICLE_RE.match(s.strip())
+    if m and "-" not in m.group(1):
+        return f"{m.group(2).capitalize()} {m.group(1)}"
+    return s
+
+
+def trailing_article(store: TrackStore) -> None:
+    """Move trailing articles to the front in artist and song fields, e.g.
+    'Models, The' -> 'The Models', 'Whole New World, A' -> 'A Whole New World'.
+
+    Deterministic and safe: only triggers when a field ENDS in ', The/A/An'.
+    Best run after Clean, which strips karaoke suffixes that would otherwise
+    sit between the name and its trailing article."""
+    fixed = 0
+    for t in store.all():
+        new_a = _fix_trailing_article(t.artist)
+        new_s = _fix_trailing_article(t.song)
+        if new_a != t.artist or new_s != t.song:
+            t.artist, t.song = new_a, new_s
+            fixed += 1
+    questionary.print(f"Fixed {fixed} trailing articles")
+
+
 def standard_artist(store: TrackStore) -> None:
     # swapping "artist, name" to "name artist"
     index = ArtistIndex.from_store(store)
@@ -1268,6 +1454,7 @@ def run_interactive(store: TrackStore) -> None:
         "review",
         "tag-review",
         "tag-swap",
+        "musicbrainz",
         "fixup",
         "fix-artist",
         "fix-unknown",
@@ -1276,12 +1463,17 @@ def run_interactive(store: TrackStore) -> None:
         "tag-fill",
         "unswap",
         "uncomma",
+        "trailing-article",
         "ungroup",
         "fuzz",
         "fuzz_song",
         "exit",
     ]
-    choices = [Choice(o.capitalize(), value=o) for o in options]
+    online = {"musicbrainz"}  # options that need internet, flagged in the menu
+    choices = [
+        Choice(o.capitalize() + (" (online)" if o in online else ""), value=o)
+        for o in options
+    ]
 
     while True:
         result = questionary.select(
@@ -1321,6 +1513,8 @@ def run_interactive(store: TrackStore) -> None:
             auto_ok_from_tags(store)
         elif result == "tag-swap":
             swap_from_tags(store)
+        elif result == "musicbrainz":
+            musicbrainz_lookup(store)
         elif result == "fixup":
             browse_fixup(store)
         elif result == "fix-artist":
@@ -1329,6 +1523,7 @@ def run_interactive(store: TrackStore) -> None:
             fix_unknown(store)
         elif result == "all-clean":
             clean(store)
+            trailing_article(store)
             fill_artist_from_tags(store)
             # find_swapped(store)
             standard_artist(store)
@@ -1343,6 +1538,8 @@ def run_interactive(store: TrackStore) -> None:
             find_swapped(store)
         elif result == "uncomma":
             standard_artist(store)
+        elif result == "trailing-article":
+            trailing_article(store)
         elif result == "ungroup":
             ungroup_artist(store)
         elif result == "fuzz":
