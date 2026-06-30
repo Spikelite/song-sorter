@@ -18,14 +18,18 @@ def _compute_hash(data: bytes) -> str:
     """Compute SHA-256 hash of data, hex-encoded."""
     return hashlib.sha256(data).hexdigest()
 
-def _read_member_raw(zf, name):
-    info = zf.getinfo(name)
-    with zf.open(info) as raw:
-        comp = raw._fileobj.read(info.compress_size)   # raw compressed bytes
-    if info.compress_type == zipfile.ZIP_STORED:
-        return comp
-    return zlib.decompressobj(-15).decompress(comp)     # raw deflate, no CRC
+def _read_member(zf, name):
+    """Read a zip member, returning (data, crc_ok).
 
+    On a CRC-32 mismatch the bytes still decompressed fine, so we re-read
+    with the checksum disabled and flag the result as unverified rather
+    than dropping the track."""
+    try:
+        return zf.read(name), True
+    except zipfile.BadZipFile:
+        f = zf.open(name)
+        f._expected_crc = None   # private CPython attr; disables end-of-stream CRC check
+        return f.read(), False
 
 def _mp3_info(data: bytes) -> dict[str, str]:
     """Extract length and quality from MP3 bytes. Returns empty dict on failure."""
