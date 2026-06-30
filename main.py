@@ -101,23 +101,41 @@ def add_tracks(store: TrackStore, root: Path) -> None:
     print(f"\nAdded {added} track(s).")
 
 def add_details(store: TrackStore, root: Path) -> None:
-    """ Modifies track metadata, to include size and mp3 metadata. """
-    added = 0
+    """ Modifies track metadata, to include size and mp3 metadata.
 
-    files = [p for p in root.rglob("*") if p.is_file()]
+    Delta cache: a track is skipped when its source file is unchanged since
+    it was last detailed (same size + mtime), so a re-run only touches new
+    or modified files. Progress is persisted on exit, so a quit partway
+    through resumes from where it left off. Delete the cache to force a
+    full re-detail (e.g. after changing how details are extracted)."""
+    added = 0
+    skipped = 0
+
+    # Sorted for seek-friendly ordering on a single spinning disk.
+    files = sorted(p for p in root.rglob("*") if p.is_file())
     for p in tqdm(files, desc="Details", unit="file"):
         tpath = str(p.resolve())
         track = store.get(tpath)
+        if track is None:
+            continue
 
-        if track:
-            if len(track.metadata) >= 4:
-                continue
+        stat = p.stat()
+        sig_mtime = str(int(stat.st_mtime))
+        sig_size = str(stat.st_size)
 
-            details = track_details(p)
-            track.metadata.update(details)
-            added += 1
+        # Skip if already detailed and the source file hasn't changed.
+        if (track.metadata.get("src_mtime") == sig_mtime
+                and track.metadata.get("src_size") == sig_size):
+            skipped += 1
+            continue
 
-    print(f"\nAdded {added} track(s).")
+        details = track_details(p)
+        details["src_mtime"] = sig_mtime
+        details["src_size"] = sig_size
+        track.metadata.update(details)
+        added += 1
+
+    print(f"\nAdded {added} track(s), skipped {skipped} unchanged.")
 
 def _format_metadata(metadata: dict[str, str]) -> str:
     
