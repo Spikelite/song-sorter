@@ -64,11 +64,17 @@ The interactive menu (`python main.py`) operates on a persistent track store
   against known artists.
 
 ### Automated cleanup
-- **All-clean** — Run the full cleanup chain in sequence: Clean → Uncomma →
-  Ungroup → Fuzz → Fuzz_song.
+- **All-clean** — Run the full cleanup chain in sequence: Clean → Tag-fill →
+  Uncomma → Ungroup → Fuzz → Fuzz_song.
 - **Clean** — Strip common karaoke descriptors (e.g. `wvocal`, `(Wobgv)`,
   `(Instrumental)`, `(Duet)`) from artist/song fields, recording what was
-  removed in `style` metadata.
+  removed in `style` metadata. Also clears bare track-number artists (a 1–2
+  digit `artist` like `04`, left by filenames such as `EZH-31 - 04 - Milkshake`)
+  to `Unknown`, preserving the number and catalog id in metadata.
+- **Tag-fill** — Fill `Unknown`/empty artists from the MP3's ID3 `tag_artist`,
+  only for clean real-looking names (additive — never overwrites an existing
+  artist). Ambiguous tags (bare numbers, catalog-style IDs) are kept and
+  flagged in metadata (`artist_review`) for later review rather than guessed at.
 - **Unswap** — Find tracks whose **song** field is actually a known artist
   name (and whose artist field isn't), and swap them — applied only where ≥3
   such tracks in the same folder agree.

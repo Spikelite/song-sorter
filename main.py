@@ -951,6 +951,56 @@ def clean(store: TrackStore) -> None:
     questionary.print(f"Cleared {cleared} track-number artists")
 
 
+# Karaoke descriptor suffixes that appear inside ID3 artist tags, e.g.
+# "Zac Brown Band (Wbgv)". Stripped before a tag is used as an artist.
+_TAG_SUFFIX_RE = re.compile(
+    r"\s*\((?:w[\s-]?o?b?gv|bgv|w[\s-]?vocals?|wvocals?|duet|solo|instrumental|music only)\)\s*",
+    re.IGNORECASE,
+)
+
+
+def fill_artist_from_tags(store: TrackStore) -> None:
+    """Fill Unknown/empty artists from the MP3's ID3 tag_artist, conservatively.
+
+    Only clean, real-looking tags are applied, and only where there is no
+    artist already (a real artist is never overwritten). Ambiguous tags are
+    NOT auto-filled -- they are kept and flagged for later manual / automated
+    review so no data is lost:
+      - bare numbers (e.g. 311, 1975): could be a real band or junk
+      - catalog-id-shaped (e.g. PS1254, dsny01)
+    Filled artists are marked metadata['artist_from']='tag'; flagged ones get
+    metadata['artist_review'] (the candidate) + ['artist_review_reason']."""
+    filled = 0
+    flagged = 0
+    for t in store.all():
+        if t.artist.strip().lower() not in ("unknown", ""):
+            continue
+        raw = t.metadata.get("tag_artist")
+        if not raw or raw == "<not-found>":
+            continue
+        cand = _TAG_SUFFIX_RE.sub("", raw).strip()
+        if not cand:
+            continue
+
+        reason = None
+        if re.fullmatch(r"\d+", cand):
+            reason = "numeric"
+        elif re.fullmatch(r"[A-Za-z]+\d{2,}", cand):
+            reason = "catalog-id"
+
+        if reason:
+            # Keep the candidate and flag it; do not auto-fill an ambiguous tag.
+            t.metadata["artist_review"] = cand
+            t.metadata["artist_review_reason"] = reason
+            flagged += 1
+        else:
+            t.artist = cand
+            t.metadata["artist_from"] = "tag"
+            filled += 1
+
+    questionary.print(f"Filled {filled} artists from tags; flagged {flagged} for review")
+
+
 def standard_artist(store: TrackStore) -> None:
     # swapping "artist, name" to "name artist"
     index = ArtistIndex.from_store(store)
@@ -1139,6 +1189,7 @@ def run_interactive(store: TrackStore) -> None:
         "fix-unknown",
         "all-clean",
         "clean",
+        "tag-fill",
         "unswap",
         "uncomma",
         "ungroup",
@@ -1190,11 +1241,14 @@ def run_interactive(store: TrackStore) -> None:
             fix_unknown(store)
         elif result == "all-clean":
             clean(store)
+            fill_artist_from_tags(store)
             # find_swapped(store)
             standard_artist(store)
             ungroup_artist(store)
             fuzz_artist(store)
             fuzz_song(store)
+        elif result == "tag-fill":
+            fill_artist_from_tags(store)
         elif result == "clean":
             clean(store)
         elif result == "unswap":
