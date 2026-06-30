@@ -30,4 +30,5 @@ Then clean up matches:
 Python 3 with 
 - [questionary](https://github.com/tmbo/questionary) (prompts), 
 - [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) (string similarity), 
-- [mutagen](https://mutagen.readthedocs.io/) (MP3 metadata).
+- [mutagen](https://mutagen.readthedocs.io/) (MP3 metadata),
+- [tqdm](https://tqdm.github.io/) (progress bars).
