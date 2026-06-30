@@ -4,9 +4,11 @@ A one off tool for cleaning a karaoke library (ZIP / CDG+MP3 pairs), matching up
 
 ## Setup
 
+Requires **Python 3.9+**.
+
 ```text
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -16,14 +18,19 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The main workflow:
-- **search** to scan folders folders
-- **detail** adds track metadata
+This launches an interactive menu (see **Main Menu Options** below). Everything
+operates on a persistent store, so you can stop and resume at any point.
 
-For iterating faster, after those run all the track details are stored in a json blob.
+### Typical workflow
 
-Then clean up matches:
-- **all-clean** runs a lot of individual cleanup commands.
+1. **Search** a folder to add tracks to the store.
+2. **Detail** to extract metadata and ID3 tags (incremental — safe to re-run).
+3. **Tag-fill**, **Tag-review**, **Tag-swap** — use the embedded ID3 tags to
+   fill missing artists, auto-accept already-correct parses, and fix reversed
+   ones. These clear the bulk of the work automatically.
+4. **All-clean** to run the automated text-cleanup chain.
+5. **Review** / **Fixup** to hand-fix whatever automation couldn't resolve.
+6. **Final-final** to write one best copy per artist+song to the output tree.
 
 ## Main Menu Options
 
@@ -104,6 +111,31 @@ The interactive menu (`python main.py`) operates on a persistent track store
   MP3) and copy its files into an output tree organized as
   `<output>/<first-letter>/<artist>/<name>.<ext>`, skipping unknown artists.
 - **Exit** — Leave the menu (the store is saved on the way out).
+
+## Data & files
+
+State lives under `.cache/song-sorter/` (git-ignored):
+
+- **`cache.json`** — the track store: one record per track with its parsed
+  `artist`/`song`, `file_types`, and a `metadata` dict (hashes, sizes, MP3 info,
+  ID3 `tag_*` fields, and provenance markers like `artist_from` / `artist_review`).
+  Written atomically, and checkpointed during long **Detail** runs.
+- **`review-state.json`** — per-track review decisions (e.g. `ok`), kept
+  separate from the track data so re-running cleanup never loses review progress.
+
+Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
+
+## Development
+
+Run the tests with [pytest](https://pytest.org):
+
+```text
+pip install pytest
+pytest
+```
+
+`test_docs.py` guards against documentation drift: it fails if a menu option in
+`main.py` is missing from the **Main Menu Options** reference above.
 
 ## Stack
 
