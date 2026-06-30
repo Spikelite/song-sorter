@@ -895,6 +895,27 @@ def clean(store: TrackStore) -> None:
 
     questionary.print(f"Modified {modify_count}")
 
+    # Karaoke track numbers parsed as the artist: filenames like
+    # "EZH-31 - 04 - Milkshake" leave artist="04". A bare 1-2 digit value is a
+    # disc track position, never a real artist. We deliberately do NOT touch
+    # 3+ digit names (911, 411, 112 are real bands), letters-with-digits
+    # (Blink-182, Maroon-5), or song titles (hundreds legitimately start with a
+    # number). Cleared artists become "Unknown" for later recovery via Fix-unknown.
+    cleared = 0
+    for t in store.all():
+        artist = t.artist.strip()
+        if re.fullmatch(r"\d{1,2}", artist):
+            # Preserve what we prune: the disc track number, and the catalog id
+            # (parts[0] of the original filename, dropped at parse time). Both
+            # are useful later (e.g. catalog-number -> real-artist lookup).
+            t.metadata["track_no"] = artist
+            stem_parts = Path(t.path).stem.split(" - ")
+            if len(stem_parts) >= 3:
+                t.metadata["catalog_id"] = stem_parts[0].strip()
+            t.artist = "Unknown"
+            cleared += 1
+    questionary.print(f"Cleared {cleared} track-number artists")
+
 
 def standard_artist(store: TrackStore) -> None:
     # swapping "artist, name" to "name artist"
