@@ -83,17 +83,29 @@ def _mp3_tags(data: bytes) -> dict[str, str]:
 
 
 def _details_from_pair(
-    cdg_data: bytes,
     mp3_data: bytes,
+    *,
+    cdg_data: bytes | None = None,
     cdg_size: int | None = None,
+    cdg_crc: int | None = None,
     mp3_size: int | None = None,
 ) -> dict[str, str]:
-    """Build details dict from CDG and MP3 data."""
+    """Build details dict from an MP3 plus a CDG fingerprint.
+
+    The CDG is identified by a CRC-32. The zip central directory supplies
+    that for free (pass cdg_crc + cdg_size, no decompression needed). For
+    loose .cdg files we pass cdg_data and compute the same CRC-32 from the
+    bytes, so a given CDG fingerprints identically whether zipped or loose."""
+    if cdg_crc is None and cdg_data is not None:
+        cdg_crc = zlib.crc32(cdg_data)
+    if cdg_size is None and cdg_data is not None:
+        cdg_size = len(cdg_data)
+
     out: dict[str, str] = {
         "mp3_hash": _compute_hash(mp3_data),
         "mp3_size": str(len(mp3_data) if mp3_size is None else mp3_size),
-        "cdg_hash": _compute_hash(cdg_data),
-        "cdg_size": str(len(cdg_data) if cdg_size is None else cdg_size),
+        "cdg_hash": format(cdg_crc, "08x") if cdg_crc is not None else "",
+        "cdg_size": str(cdg_size if cdg_size is not None else 0),
     }
 
     mp3_info = _mp3_info(mp3_data)
@@ -129,7 +141,7 @@ def track_details(path: str | Path) -> dict[str, str]:
             cdg_data = f.read()
         with open(mp3_path, "rb") as f:
             mp3_data = f.read()
-        return _details_from_pair(cdg_data, mp3_data)
+        return _details_from_pair(mp3_data, cdg_data=cdg_data)
 
     if suffix == ".mp3":
         cdg_path = p.with_suffix(".cdg")
@@ -139,7 +151,7 @@ def track_details(path: str | Path) -> dict[str, str]:
             cdg_data = f.read()
         with open(p, "rb") as f:
             mp3_data = f.read()
-        return _details_from_pair(cdg_data, mp3_data)
+        return _details_from_pair(mp3_data, cdg_data=cdg_data)
 
     if suffix == ".zip":
         try:
@@ -160,12 +172,13 @@ def track_details(path: str | Path) -> dict[str, str]:
                 cdg_member = stems["cdg"]
                 mp3_member = stems["mp3"]
                 mp3_data, mp3_ok = _read_member(zf, mp3_member)
-                cdg_data, cdg_ok = _read_member(zf, cdg_member)
-                # cdg_size = zf.getinfo(cdg_member).file_size
-                # mp3_size = zf.getinfo(mp3_member).file_size
+                # CDG: take size + CRC-32 straight from the zip directory.
+                # No need to read or decompress the CDG member at all.
+                cdg_info = zf.getinfo(cdg_member)
                 return _details_from_pair(
-                    cdg_data, mp3_data,
-                    # cdg_size=cdg_size, mp3_size=mp3_size
+                    mp3_data,
+                    cdg_size=cdg_info.file_size,
+                    cdg_crc=cdg_info.CRC,
                 )
         except NotImplementedError as e:
             # Unsupported compression method (something even deflate64 can't handle)
