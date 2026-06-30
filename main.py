@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -821,7 +822,7 @@ def tracks_to_keep(store: TrackStore) -> None:
                     # final step, copy from track.path to (output) /
                     to_path.parent.mkdir(parents=True, exist_ok=True)
                     source_path = Path(best_track.path)
-                    source_path.copy(to_path)
+                    shutil.copy2(source_path, to_path)
 
         else:
             node_set.extend(n.list_nodes().values())
