@@ -1142,8 +1142,20 @@ def musicbrainz_lookup(store: TrackStore) -> None:
         f"flagged {flagged}, suggested {suggested}, no-match {nomatch}")
 
 
+def _norm_eq(a: str, b: str) -> bool:
+    """True if two strings match ignoring case, spaces and punctuation."""
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    return norm(a) == norm(b)
+
+
 def review_mode(store: TrackStore) -> None:
-    """Sequential review of tracks from artists with 5 or fewer tracks."""
+    """Sequential review of tracks from artists with 5 or fewer tracks.
+
+    A track is only marked reviewed ('ok') by choosing (ok) or accepting a
+    suggestion. swap/edit/auto-clean apply a change but keep you on the same
+    track so you can keep adjusting until it's right; (skip) moves on without
+    marking it, so it returns in a later review. Suggestions come from a prior
+    MusicBrainz run (mb_artist) or, failing that, the MP3's ID3 tag_artist."""
     review_state = ReviewState()
     review_state.load(_REVIEW_STATE_PATH)
 
@@ -1154,11 +1166,12 @@ def review_mode(store: TrackStore) -> None:
 
     session_cache: dict[str, str] = {}
 
-    choices = [
+    base_choices = [
         Choice("(exit)", value="exit", shortcut_key="0"),
         Choice("(ok)", value="ok"),
         Choice("(swap)", value="swap"),
         Choice("(edit)", value="edit"),
+        Choice("(skip)", value="skip"),
     ]
 
     i = 0
@@ -1175,38 +1188,90 @@ def review_mode(store: TrackStore) -> None:
             stem = Path(track.path).stem
             questionary.print(f"[{i + 1}/{len(tracks)}] {stem} -> '{track.artist} - {track.song}'")
 
+            extra = []
             art_clean = clean_artist(track.artist)
-            track_choices = None
             if '&' in art_clean or ',' in art_clean:
                 prefix, feature = _auto_clean_artist(track.artist)
-                track_choices = list(choices)
-                track_choices.append(
-                    Choice(f"auto [{prefix}]", value="auto-clean")
-                )
-            result = questionary.select("Edit this track?", choices=track_choices or choices).ask()
+                extra.append(Choice(f"auto [{prefix}]", value="auto-clean"))
+            mb_artist = track.metadata.get("mb_artist")
+            mb_title = track.metadata.get("mb_title", "")
+            if mb_artist:
+                mb_kind = track.metadata.get("mb_match", "mb")
+                questionary.print(f"    MusicBrainz ({mb_kind}): '{mb_artist}' / '{mb_title}'")
+                set_a = not _norm_eq(mb_artist, track.artist)
+                set_t = bool(mb_title) and not _norm_eq(mb_title, track.song)
+                if set_a and set_t:
+                    label = f"use MB -> artist '{mb_artist}', song '{mb_title}'"
+                elif set_a:
+                    label = f"use MB -> artist '{mb_artist}'"
+                elif set_t:
+                    label = f"use MB -> song '{mb_title}'"
+                else:
+                    label = None
+                if label:
+                    extra.append(Choice(label, value="mb-accept"))
+
+            # ID3 tag as an offline fallback suggestion (cleaned of karaoke noise).
+            tag = track.metadata.get("tag_artist")
+            tag_clean = _mb_norm(tag, uncomma=True) if tag and tag != "<not-found>" else ""
+            if tag_clean and not _norm_eq(tag_clean, track.artist):
+                questionary.print(f"    ID3 tag: '{tag_clean}'")
+                extra.append(Choice(f"use tag -> artist '{tag_clean}'", value="tag-accept"))
+
+            result = questionary.select("Edit this track?", choices=base_choices + extra).ask()
 
         if result is None or result == "exit":
             review_state.save(_REVIEW_STATE_PATH)
             break
 
-        session_cache[key] = result
+        # Only (ok) and accepting a suggestion mark a track reviewed and advance.
+        # swap/edit/auto-clean apply a change but stay on the same track so you
+        # can keep adjusting; (skip) moves on without marking it (it returns in a
+        # later review).
+        advance = False
         if result == "ok":
             review_state.set(track.path, "ok")
             review_state.save(_REVIEW_STATE_PATH)
+            session_cache[key] = "ok"
+            advance = True
+        elif result == "skip":
+            session_cache[key] = "skip"
+            advance = True
+        elif result == "mb-accept":
+            mb_artist = track.metadata.get("mb_artist")
+            mb_title = track.metadata.get("mb_title", "")
+            if mb_artist:
+                if not _norm_eq(mb_artist, track.artist):
+                    track.artist = mb_artist
+                if mb_title and not _norm_eq(mb_title, track.song):
+                    track.song = mb_title
+                store.add(track)
+                review_state.set(track.path, "ok")
+                review_state.save(_REVIEW_STATE_PATH)
+                advance = True
+        elif result == "tag-accept":
+            tag = track.metadata.get("tag_artist")
+            tag_clean = _mb_norm(tag, uncomma=True) if tag else ""
+            if tag_clean:
+                track.artist = tag_clean
+                store.add(track)
+                review_state.set(track.path, "ok")
+                review_state.save(_REVIEW_STATE_PATH)
+                advance = True
         elif result == "swap":
             track.artist, track.song = track.song, track.artist
-            store.add(track)
+            store.add(track)  # stay on this track
         elif result == "auto-clean":
-            # ungroup, uncomma, and clean the artist
             prefix, feature = _auto_clean_artist(track.artist)
             track.artist = prefix
             if feature:
                 track.metadata["feature"] = feature.strip()
-            store.add(track)
+            store.add(track)  # stay on this track
         elif result == "edit":
-            _edit_track_details(store, track)
+            _edit_track_details(store, track)  # stay on this track
 
-        i += 1
+        if advance:
+            i += 1
 
 def report_track_count(store: TrackStore) -> None:
     """ List a summary of track information """

@@ -64,9 +64,14 @@ The interactive menu (`python main.py`) operates on a persistent track store
 
 ### Reviewing & manual fixes
 - **Review** — Step through tracks from "thin" artists (artists with ≤5
-  tracks) one at a time. For each you can mark **ok**, **swap** artist/song,
-  **edit** fields, or **auto-clean** the artist. Decisions are saved to a
-  persistent review state and reapplied to identical entries within a session.
+  tracks) one at a time. Options: **ok**, **swap** artist/song, **edit** fields,
+  **auto-clean** the artist, **skip** (come back later), and — when a suggestion
+  exists — **use MB** / **use tag** (from a prior Musicbrainz run, or the MP3's
+  ID3 `tag_artist` as an offline fallback), which show and apply exactly which
+  field(s) they'll set (fields already matching are left alone). Only **ok** or
+  accepting a suggestion marks a track reviewed; **swap**/**edit**/**auto-clean**
+  keep you on the same track so you can keep adjusting until it's right. `ok`/
+  `skip` decisions are reused for identical entries within a session.
 - **Tag-review** — Automatically mark review tracks **ok** when the parsed
   artist is corroborated by the MP3's ID3 `tag_artist` (matched ignoring word
   order, catalog prefixes, karaoke suffixes, and `&`/`and`/`feat`). Clears the
