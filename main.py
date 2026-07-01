@@ -932,6 +932,7 @@ def _mb_sim(a: str, b: str) -> float:
         s = _MB_NOISE_RE.sub(" ", s)
         s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
         s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+        s = re.sub(r"\b(and|feat|ft|featuring)\b", " ", s)  # '&' (already dropped)/'and'/'feat' equivalent
         s = re.sub(r"\s+", " ", s).strip()
         return re.sub(r"^the ", "", s)  # ignore a leading article when matching
     return rapidfuzz.fuzz.token_sort_ratio(clean(a), clean(b))
@@ -956,6 +957,18 @@ def _mb_search_title(title: str) -> list:
     credits. Raises on network error."""
     q = f'recording:"{_mb_escape(_mb_norm(title))}"'
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "20"})
+    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.load(resp).get("recordings", [])
+
+
+def _mb_search_release(title: str, release: str) -> list:
+    """Search MusicBrainz by title + release. For soundtrack tracks whose
+    'artist' field is really the album/soundtrack name, a hit identifies the
+    real performer (self-corroborated by the release match). Raises on error."""
+    q = (f'recording:"{_mb_escape(_mb_norm(title))}" '
+         f'AND release:"{_mb_escape(_mb_norm(release))}"')
+    url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "10"})
     req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.load(resp).get("recordings", [])
@@ -1005,7 +1018,7 @@ def musicbrainz_lookup(store: TrackStore) -> None:
     def _needs_mb(t: Track) -> bool:
         if not t.metadata.get("mb_checked"):
             return True  # never looked up
-        return recheck and t.metadata.get("mb_match") in ("none", "flag")
+        return recheck and t.metadata.get("mb_match") in ("none", "flag", "suggest")
 
     todo = [t for t in _tracks_to_review(store, review_state) if _needs_mb(t)]
     if not todo:
@@ -1017,7 +1030,7 @@ def musicbrainz_lookup(store: TrackStore) -> None:
         default=False,
     ).ask())
 
-    okd = swapped = flagged = nomatch = 0
+    okd = swapped = flagged = suggested = nomatch = 0
     pair_cache: dict[tuple, tuple] = {}
     consecutive_fail = 0
     last_save = time.monotonic()
@@ -1030,12 +1043,13 @@ def musicbrainz_lookup(store: TrackStore) -> None:
             key = (a.lower(), s.lower())
             try:
                 if key in pair_cache:
-                    na, nt, ma, mt, was_swap, via_title = pair_cache[key]
+                    na, nt, ma, mt, was_swap, via_title, sug_a, sug_t = pair_cache[key]
                 else:
                     res = _mb_search(a, s)
                     time.sleep(1.1)  # MusicBrainz: ~1 req/sec
                     na, nt, ma, mt = _mb_best(res, a, s)
                     was_swap = via_title = False
+                    sug_a = sug_t = ""
                     if not (na >= _MB_STRONG and nt >= _MB_STRONG):
                         # Try the reversed orientation to catch swapped parses.
                         res2 = _mb_search(s, a)
@@ -1052,7 +1066,19 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                         ta, tt, tma, tmt = _mb_best(res3, a, s)
                         if ta >= _MB_STRONG and tt >= _MB_STRONG:
                             na, nt, ma, mt, via_title = ta, tt, tma, tmt, True
-                    pair_cache[key] = (na, nt, ma, mt, was_swap, via_title)
+                        else:
+                            # Soundtrack fallback: our 'artist' may actually be the
+                            # album/soundtrack name. Query title + release; a hit
+                            # identifies the real performer, corroborated by the
+                            # release match. Recorded as a suggestion, never applied.
+                            res4 = _mb_search_release(s, a)
+                            time.sleep(1.1)
+                            for r in res4:
+                                if _mb_sim(s, r.get("title", "")) >= _MB_STRONG:
+                                    sug_a = _mb_credit_name(r.get("artist-credit"))
+                                    sug_t = r.get("title", "")
+                                    break
+                    pair_cache[key] = (na, nt, ma, mt, was_swap, via_title, sug_a, sug_t)
                 consecutive_fail = 0
             except Exception:
                 consecutive_fail += 1
@@ -1081,6 +1107,15 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                 flagged += 1
                 if verbose:
                     tqdm.write(f"flag  {a!r} - {s!r}  diverges from mb {ma!r}/{mt!r}  (a={na:.0f} t={nt:.0f})")
+            elif sug_a:
+                # Title mapped to one dominant MB artist we couldn't corroborate
+                # -- record the suggestion for review; never auto-applied.
+                t.metadata["mb_match"] = "suggest"
+                t.metadata["mb_artist"] = sug_a
+                t.metadata["mb_title"] = sug_t
+                suggested += 1
+                if verbose:
+                    tqdm.write(f"sug   {a!r} - {s!r}  ->  mb {sug_a!r}/{sug_t!r}  (title only, unconfirmed)")
             else:
                 t.metadata["mb_match"] = "none"
                 nomatch += 1
@@ -1097,7 +1132,7 @@ def musicbrainz_lookup(store: TrackStore) -> None:
 
     questionary.print(
         f"MusicBrainz: ok'd {okd} (incl {swapped} swapped), "
-        f"flagged {flagged}, no-match {nomatch}")
+        f"flagged {flagged}, suggested {suggested}, no-match {nomatch}")
 
 
 def review_mode(store: TrackStore) -> None:

@@ -78,14 +78,17 @@ The interactive menu (`python main.py`) operates on a persistent track store
   and mark reviewed. The known-artist check guards against mislabeled tags
   (e.g. Disney tracks whose ID3 artist is the song title), which are left for
   manual review.
-- **Musicbrainz** *(online)* — Last-resort corroboration for tracks with no
-  usable tag. Queries MusicBrainz by artist + title (and the reversed
-  orientation, to catch swapped parses): a confident match marks the track
-  **ok** (swapping if needed); a record that exists but diverges far from our
-  data is flagged in metadata (`mb_artist`/`mb_title`) for review rather than
-  applied; no match is left for manual review. **Offline-safe** — it skips
-  cleanly without internet, is rate-limited and cached/resumable, and is never
-  part of an offline batch.
+- **Musicbrainz** *(online)* — Last-resort corroboration for review tracks. It
+  tries, in order: **artist + title**, the **reversed** orientation (to catch
+  swapped parses), and a **title-only** search (accepted only when our artist
+  strongly matches a result). A confident match marks the track **ok** (swapping
+  if needed). For **soundtrack** tracks — where the "artist" field is really the
+  film/album — it queries **title + release** and records the real performer as
+  a **suggestion** (`mb_artist`) for review. Near-but-different matches are
+  **flagged**; the rest are left as no-match. On a re-run it can **re-check**
+  tracks previously scored none/flag/suggest (e.g. after matching improvements).
+  **Offline-safe** — skips cleanly without internet, rate-limited,
+  cached/resumable, and never part of an offline batch.
 - **Fixup** — Browse only the not-yet-reviewed tracks from thin artists,
   grouped by artist, for editing.
 - **Fix-artist** — Browse all artists; drilling into one lets you **bulk
