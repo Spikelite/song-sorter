@@ -909,18 +909,23 @@ _MB_NOISE_RE = re.compile(
 
 def _mb_norm(s: str, uncomma: bool = False) -> str:
     """Normalize a field for a MusicBrainz phrase query: strip catalog/karaoke
-    noise, collapse whitespace, and (for artists) flip a single 'Last, First'
-    to 'First Last' so MB can phrase-match it (MB stores 'First Last')."""
+    noise and collapse whitespace. For artists, flip a single 'Last, First' or
+    'X, The' -> 'First Last' / 'The X' on the PRIMARY name (before the first
+    &/feat) so MB can phrase-match multi-artist credits like
+    'Chesney, Kenny & Uncle Kracker'. This only shapes the query -- scoring
+    always uses the original string, so a mis-flip of a comma-band such as
+    'Emerson, Lake & Palmer' can never produce a wrong match."""
     s = _CATALOG_PREFIX_RE.sub("", s or "")
     s = _MB_NOISE_RE.sub(" ", s)
-    # Flip 'Last, First' -> 'First Last', but only for a lone name: a '&'/'and'/
-    # 'feat' means it's a collaboration (e.g. 'Emerson, Lake & Palmer') where the
-    # comma is part of the name, not a Last/First inversion.
-    if (uncomma and s.count(",") == 1
-            and not re.search(r"&|\b(and|feat|ft|featuring)\b", s, re.IGNORECASE)):
-        left, right = s.split(",")
-        if left.strip() and right.strip():
-            s = f"{right.strip()} {left.strip()}"
+    if uncomma:
+        parts = re.split(r"(\s*(?:&|\b(?:and|feat|ft|featuring)\b\.?)\s*)",
+                         s, maxsplit=1, flags=re.IGNORECASE)
+        head = parts[0]
+        if head.count(",") == 1:
+            left, right = head.split(",")
+            if left.strip() and right.strip():
+                head = f"{right.strip()} {left.strip()}"
+        s = head + "".join(parts[1:])
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -935,7 +940,8 @@ def _mb_sim(a: str, b: str) -> float:
         s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
         s = re.sub(r"\b(and|feat|ft|featuring)\b", " ", s)  # '&' (already dropped)/'and'/'feat' equivalent
         s = re.sub(r"\s+", " ", s).strip()
-        return re.sub(r"^the ", "", s)  # ignore a leading article when matching
+        s = re.sub(r"^the ", "", s)     # ignore a leading article...
+        return re.sub(r" the$", "", s)  # ...or a trailing one ('Four Aces, The')
     return rapidfuzz.fuzz.token_sort_ratio(clean(a), clean(b))
 
 
