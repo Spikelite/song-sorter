@@ -931,6 +931,7 @@ def _mb_sim(a: str, b: str) -> float:
     def clean(s):
         s = _MB_NOISE_RE.sub(" ", s)
         s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+        s = s.replace("'", "")  # drop apostrophes (curly ones already gone) so contractions line up
         s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
         s = re.sub(r"\b(and|feat|ft|featuring)\b", " ", s)  # '&' (already dropped)/'and'/'feat' equivalent
         s = re.sub(r"\s+", " ", s).strip()
