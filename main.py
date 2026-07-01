@@ -51,11 +51,24 @@ def _uncomma_artist(artist: str) -> str:
     return None
 
 
-def import_path() -> Path | None:
-    """Prompt for a path, and verify it exists.  Used to load a folder."""
+def _default_scan_dir(store: TrackStore) -> str:
+    """A sensible default for the path prompt: the directory of the first
+    stored track (a previously-scanned location), or '.' if the store is empty.
+    With tracks from several roots, this is simply the first one found."""
+    for t in store.all():
+        if t.path:
+            return str(Path(t.path).parent)
+    return "."
+
+
+def import_path(default: str = ".") -> Path | None:
+    """Prompt for a path, and verify it exists.  Used to load a folder.
+
+    `default` pre-fills the prompt; callers pass a previously-scanned directory
+    so re-runs don't start at '.'."""
     path_str = questionary.path(
         "Enter path to search:",
-        default=".",
+        default=default,
     ).ask()
 
     if path_str is None:
@@ -70,42 +83,46 @@ def import_path() -> Path | None:
     return root
  
 def add_tracks(store: TrackStore, root: Path) -> None:
-    """Walk root for .zip and .cdg files and add them to the track store."""
+    """Walk root for .zip and .cdg files and add NEW ones to the track store.
+
+    Tracks already in the store are left untouched, so re-running Search is
+    additive: it picks up new files without wiping the metadata (hashes, tags,
+    detail, review provenance) of files already present. Use Refresh to
+    re-parse names on existing tracks."""
     added = 0
+    skipped = 0
 
     files = [p for p in root.rglob("*") if p.is_file()]
     for p in tqdm(files, desc="Scanning", unit="file"):
+        suffix = p.suffix.lower()
+        if suffix not in (".zip", ".cdg"):
+            continue
+
+        tpath = str(p.resolve())
+        if store.get(tpath) is not None:
+            skipped += 1  # already known -- never overwrite its metadata
+            continue
+
         stem = p.stem
         artist, song = _parse_artist_song(stem)
-        track = None
-
         if "song-artist" in p.parts:
             # some parts of the path are reversed
             artist, song = song, artist
 
-        if p.suffix.lower() == ".zip":
-            track = Track(
-                path=str(p.resolve()),
-                file_types=["zip"],
-                artist=artist or "Unknown",
-                song=song,
-            )
-        elif p.suffix.lower() == ".cdg":
-            mp3_path = p.with_suffix(".mp3")
-            file_types = ["mp3", "cdg"] if mp3_path.exists() else ["cdg"]
+        if suffix == ".zip":
+            file_types = ["zip"]
+        else:  # .cdg
+            file_types = ["mp3", "cdg"] if p.with_suffix(".mp3").exists() else ["cdg"]
 
-            track = Track(
-                path=str(p.resolve()),
-                file_types=file_types,
-                artist=artist or "Unknown",
-                song=song,
-            )
+        store.add(Track(
+            path=tpath,
+            file_types=file_types,
+            artist=artist or "Unknown",
+            song=song,
+        ))
+        added += 1
 
-        if track is not None:
-            store.add(track)
-            added += 1
-
-    print(f"\nAdded {added} track(s).")
+    print(f"\nAdded {added} new track(s), skipped {skipped} already present.")
 
 def add_details(store: TrackStore, root: Path, workers: int = 4,
                 checkpoint_seconds: int = 300) -> None:
@@ -492,7 +509,7 @@ def _edit_track_details(store: TrackStore, track: Track) -> None:
             store.add(track)
 
 def browse_fixup(store: TrackStore) -> None:
-    """Browse and fix up artists with three or fewer tracks."""
+    """Browse and fix up artists with 5 or fewer tracks."""
     review_state = ReviewState()
     review_state.load(_REVIEW_STATE_PATH)
 
@@ -979,13 +996,13 @@ def musicbrainz_lookup(store: TrackStore) -> None:
 
 
 def review_mode(store: TrackStore) -> None:
-    """Sequential review of tracks from artists with three or fewer tracks."""
+    """Sequential review of tracks from artists with 5 or fewer tracks."""
     review_state = ReviewState()
     review_state.load(_REVIEW_STATE_PATH)
 
     tracks = _tracks_to_review(store, review_state)
     if not tracks:
-        questionary.print("No tracks from artists with three or fewer tracks.")
+        questionary.print("No tracks from artists with 5 or fewer tracks.")
         return
 
     session_cache: dict[str, str] = {}
@@ -1486,15 +1503,15 @@ def run_interactive(store: TrackStore) -> None:
         if result == "exit":
             break
         if result == "search":
-            path = import_path()
+            path = import_path(_default_scan_dir(store))
             if path is not None:
                 add_tracks(store, path)
         elif result == "detail":
-            path = import_path()
+            path = import_path(_default_scan_dir(store))
             if path is not None:
                 add_details(store, path)
         elif result == "refresh":
-            path = import_path()
+            path = import_path(_default_scan_dir(store))
             if path is not None:
                 refresh_names(store, path)
         elif result == "browse":

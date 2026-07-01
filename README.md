@@ -58,7 +58,7 @@ The interactive menu (`python main.py`) operates on a persistent track store
   track count (ignoring unknown artists).
 
 ### Reviewing & manual fixes
-- **Review** — Step through tracks from "thin" artists (artists with ≤3
+- **Review** — Step through tracks from "thin" artists (artists with ≤5
   tracks) one at a time. For each you can mark **ok**, **swap** artist/song,
   **edit** fields, or **auto-clean** the artist. Decisions are saved to a
   persistent review state and reapplied to identical entries within a session.
