@@ -928,6 +928,11 @@ def musicbrainz_lookup(store: TrackStore) -> None:
         questionary.print("No un-checked review tracks for MusicBrainz.")
         return
 
+    verbose = bool(questionary.confirm(
+        "Verbose? Print a line per track alongside the progress bar.",
+        default=False,
+    ).ask())
+
     okd = swapped = flagged = nomatch = 0
     pair_cache: dict[tuple, tuple] = {}
     consecutive_fail = 0
@@ -972,15 +977,22 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                 review_state.set(t.path, "ok")
                 t.metadata["mb_match"] = "swap" if was_swap else "ok"
                 okd += 1
+                if verbose:
+                    act = "swap" if was_swap else "ok"
+                    tqdm.write(f"{act:5} {a!r} - {s!r}  ->  mb {ma!r}/{mt!r}  (a={na:.0f} t={nt:.0f})")
             elif na >= _MB_WEAK and nt >= _MB_WEAK:
                 # A recording exists but diverges -- keep for review, don't apply.
                 t.metadata["mb_match"] = "flag"
                 t.metadata["mb_artist"] = ma
                 t.metadata["mb_title"] = mt
                 flagged += 1
+                if verbose:
+                    tqdm.write(f"flag  {a!r} - {s!r}  diverges from mb {ma!r}/{mt!r}  (a={na:.0f} t={nt:.0f})")
             else:
                 t.metadata["mb_match"] = "none"
                 nomatch += 1
+                if verbose:
+                    tqdm.write(f"none  {a!r} - {s!r}  (no match)")
 
             if time.monotonic() - last_save >= 60:
                 store.save(_CACHE_PATH)
