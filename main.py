@@ -906,7 +906,9 @@ def _mb_sim(a: str, b: str) -> float:
     def clean(s):
         s = _MB_NOISE_RE.sub(" ", s)
         s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-        return re.sub(r"[^a-z0-9 ]", " ", s.lower())
+        s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+        s = re.sub(r"\s+", " ", s).strip()
+        return re.sub(r"^the ", "", s)  # ignore a leading article when matching
     return rapidfuzz.fuzz.token_sort_ratio(clean(a), clean(b))
 
 
