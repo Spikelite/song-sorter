@@ -23,14 +23,19 @@ operates on a persistent store, so you can stop and resume at any point.
 
 ### Typical workflow
 
-1. **Search** a folder to add tracks to the store.
-2. **Detail** to extract metadata and ID3 tags (incremental — safe to re-run).
-3. **Tag-fill**, **Tag-review**, **Tag-swap** — use the embedded ID3 tags to
-   fill missing artists, auto-accept already-correct parses, and fix reversed
-   ones. These clear the bulk of the work automatically.
-4. **All-clean** to run the automated text-cleanup chain.
-5. **Review** / **Fixup** to hand-fix whatever automation couldn't resolve.
-6. **Final-final** to write one best copy per artist+song to the output tree.
+1. **Search** — add tracks to the store (additive; safe to re-run).
+2. **Detail** — extract metadata + ID3 tags (incremental; safe to re-run).
+   Everything below needs the tags.
+3. **All-clean** — deterministic text cleanup, run first so strings are clean
+   before any corroboration: Clean → Trailing-article → Tag-fill → Uncomma →
+   Ungroup → Fuzz → Fuzz_song.
+4. **Tag-review** — auto-accept tracks whose artist the ID3 tag corroborates.
+5. **Tag-swap** — fix reversed parses that the tag exposes.
+6. **Musicbrainz** *(online)* — last-resort corroboration for the remainder.
+7. **Review** / **Fixup** — hand-fix whatever's left.
+8. **Final-final** — write one best copy per artist+song to the output tree.
+
+Steps 1–5, 7–8 are fully offline; only **Musicbrainz** needs internet.
 
 ## Main Menu Options
 

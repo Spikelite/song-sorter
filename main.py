@@ -876,11 +876,45 @@ def _mb_credit_name(artist_credit) -> str:
     return "".join(parts).strip()
 
 
+# Karaoke noise to drop before both querying and scoring: parentheticals,
+# bracketed tags ([SF Karaoke]), and common markers -- so '(Mplx)' etc. neither
+# breaks the query nor depresses the score against MusicBrainz's clean title.
+_MB_NOISE_RE = re.compile(
+    r"\(.*?\)|\[.*?\]|\bw[\s-]?o?b?gv\b|\bwvocals?\b|\bmultiplex\b|\bmplx\b|\bvr\b|\bkaraoke\b",
+    re.IGNORECASE,
+)
+
+
+def _mb_norm(s: str, uncomma: bool = False) -> str:
+    """Normalize a field for a MusicBrainz phrase query: strip catalog/karaoke
+    noise, collapse whitespace, and (for artists) flip a single 'Last, First'
+    to 'First Last' so MB can phrase-match it (MB stores 'First Last')."""
+    s = _CATALOG_PREFIX_RE.sub("", s or "")
+    s = _MB_NOISE_RE.sub(" ", s)
+    if uncomma and s.count(",") == 1:
+        left, right = s.split(",")
+        if left.strip() and right.strip():
+            s = f"{right.strip()} {left.strip()}"
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _mb_sim(a: str, b: str) -> float:
+    """Order- and punctuation-insensitive similarity, 0-100. Strips karaoke
+    noise first so a '(Mplx)'/'[SF Karaoke]' suffix on our side doesn't lower
+    the score against MusicBrainz's clean title."""
+    def clean(s):
+        s = _MB_NOISE_RE.sub(" ", s)
+        return re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    return rapidfuzz.fuzz.token_sort_ratio(clean(a), clean(b))
+
+
 def _mb_search(artist: str, title: str) -> list:
     """Query MusicBrainz for recordings matching artist+title.
 
     Raises on network error so the caller can handle connectivity loss."""
-    q = f'artist:"{_mb_escape(artist)}" AND recording:"{_mb_escape(title)}"'
+    qa = _mb_escape(_mb_norm(artist, uncomma=True))
+    qt = _mb_escape(_mb_norm(title))
+    q = f'artist:"{qa}" AND recording:"{qt}"'
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "5"})
     req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
     with urllib.request.urlopen(req, timeout=15) as resp:
@@ -896,8 +930,8 @@ def _mb_best(recordings: list, our_artist: str, our_title: str) -> tuple:
     for r in recordings:
         mb_title = r.get("title", "")
         mb_artist = _mb_credit_name(r.get("artist-credit"))
-        a = rapidfuzz.fuzz.token_sort_ratio(our_artist, mb_artist)
-        t = rapidfuzz.fuzz.token_sort_ratio(our_title, mb_title)
+        a = _mb_sim(our_artist, mb_artist)
+        t = _mb_sim(our_title, mb_title)
         if a + t > best[0] + best[1]:
             best = (a, t, mb_artist, mb_title)
     return best
