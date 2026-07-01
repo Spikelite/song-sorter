@@ -29,6 +29,27 @@ from review_state import ReviewState
 
 _CACHE_PATH = Path(__file__).parent / ".cache" / "song-sorter" / "cache.json"
 _REVIEW_STATE_PATH = _CACHE_PATH.parent / "review-state.json"
+_CONFIG_PATH = _CACHE_PATH.parent / "config.json"
+
+
+def _load_config() -> dict:
+    """Load persisted settings (e.g. output_path); returns {} if none/invalid."""
+    p = Path(_CONFIG_PATH)
+    if not p.exists():
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (ValueError, OSError):
+        return {}
+
+
+def _save_config(cfg: dict) -> None:
+    """Persist settings to the config file."""
+    p = Path(_CONFIG_PATH)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
 
 
 def _parse_artist_song(stem: str) -> tuple[str, str]:
@@ -892,7 +913,11 @@ def _mb_norm(s: str, uncomma: bool = False) -> str:
     to 'First Last' so MB can phrase-match it (MB stores 'First Last')."""
     s = _CATALOG_PREFIX_RE.sub("", s or "")
     s = _MB_NOISE_RE.sub(" ", s)
-    if uncomma and s.count(",") == 1:
+    # Flip 'Last, First' -> 'First Last', but only for a lone name: a '&'/'and'/
+    # 'feat' means it's a collaboration (e.g. 'Emerson, Lake & Palmer') where the
+    # comma is part of the name, not a Last/First inversion.
+    if (uncomma and s.count(",") == 1
+            and not re.search(r"&|\b(and|feat|ft|featuring)\b", s, re.IGNORECASE)):
         left, right = s.split(",")
         if left.strip() and right.strip():
             s = f"{right.strip()} {left.strip()}"
@@ -971,10 +996,20 @@ def musicbrainz_lookup(store: TrackStore) -> None:
 
     review_state = ReviewState()
     review_state.load(_REVIEW_STATE_PATH)
-    todo = [t for t in _tracks_to_review(store, review_state)
-            if not t.metadata.get("mb_checked")]
+
+    recheck = bool(questionary.confirm(
+        "Re-check tracks previously scored none/flag (e.g. after matching improvements)?",
+        default=False,
+    ).ask())
+
+    def _needs_mb(t: Track) -> bool:
+        if not t.metadata.get("mb_checked"):
+            return True  # never looked up
+        return recheck and t.metadata.get("mb_match") in ("none", "flag")
+
+    todo = [t for t in _tracks_to_review(store, review_state) if _needs_mb(t)]
     if not todo:
-        questionary.print("No un-checked review tracks for MusicBrainz.")
+        questionary.print("No tracks to look up on MusicBrainz.")
         return
 
     verbose = bool(questionary.confirm(
@@ -1153,35 +1188,87 @@ def _best_track(tracks: list[Track]) -> Track:
     return max(tracks, key=_mp3_size)
 
 def tracks_to_keep(store: TrackStore) -> None:
-    index = ArtistIndex.from_store(store)
+    """Export one best copy per artist+song to an output tree, laid out as
+    <output>/<first-letter>/<artist>/<name>.<ext> (unknown artists skipped).
 
-    node_set = [index.get_root()]
+    The output directory is prompted and remembered between runs. Files already
+    present and unchanged (same size) are skipped, so re-running is safe and
+    incremental. Stale files from earlier runs (e.g. after an artist rename) can
+    optionally be pruned."""
+    cfg = _load_config()
+    out = questionary.path(
+        "Output directory:",
+        default=cfg.get("output_path", "/tmp/output"),
+    ).ask()
+    if not out or not out.strip():
+        return
+    out = out.strip()
+    cfg["output_path"] = out
+    _save_config(cfg)
+    output_root = Path(out)
 
-    output_path = "/tmp/output"
-
-    while (node_set):
+    # Collect the desired output: dest -> source, one best copy per artist+song.
+    expected: dict[Path, Path] = {}
+    node_set = [ArtistIndex.from_store(store).get_root()]
+    while node_set:
         n = node_set.pop()
-
-        if n.is_leaf():
-            best_track = _best_track(n.list_tracks())
-            stem = Path(best_track.path).stem
-            artist = clean_artist(best_track.artist)
-            if artist in ["", "unknown"]:
-                continue
-            for exn in best_track.file_types:
-                prefix = artist[0]
-                if not re.match("[a-z]", artist[0:1]):
-                    prefix = "#"
-                to_path = Path(f"{output_path}/{prefix}/{artist}/{stem}.{exn}")
-                print(to_path)
-                if not to_path.exists():
-                    # final step, copy from track.path to (output) /
-                    to_path.parent.mkdir(parents=True, exist_ok=True)
-                    source_path = Path(best_track.path)
-                    shutil.copy2(source_path, to_path)
-
-        else:
+        if not n.is_leaf():
             node_set.extend(n.list_nodes().values())
+            continue
+        best = _best_track(n.list_tracks())
+        artist = clean_artist(best.artist)
+        if artist in ("", "unknown"):
+            continue
+        prefix = artist[0] if re.match("[a-z]", artist[:1]) else "#"
+        stem = Path(best.path).stem
+        for exn in best.file_types:
+            src = Path(best.path).with_suffix(f".{exn}")  # per-type source (.mp3/.cdg/.zip)
+            expected[output_root / prefix / artist / f"{stem}.{exn}"] = src
+
+    # Copy anything missing or changed; skip files already present and identical.
+    copied = skipped = missing = 0
+    for dest, src in expected.items():
+        if not src.exists():
+            missing += 1
+            continue
+        if dest.exists() and dest.stat().st_size == src.stat().st_size:
+            skipped += 1
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        copied += 1
+    msg = f"Output -> {output_root}: copied {copied}, skipped {skipped} unchanged"
+    if missing:
+        msg += f", {missing} source file(s) missing"
+    questionary.print(msg)
+
+    # Optional prune of stale files from earlier runs. Restricted to this tool's
+    # own <prefix>/<artist>/<file> layout so unrelated files are never touched.
+    if output_root.exists():
+        want = {d.resolve() for d in expected}
+        stale = [
+            p for p in output_root.rglob("*")
+            if p.is_file()
+            and len(p.relative_to(output_root).parts) == 3
+            and p.resolve() not in want
+        ]
+        if stale and questionary.confirm(
+            f"Prune {len(stale)} stale output file(s) no longer in the keep set?",
+            default=False,
+        ).ask():
+            for p in stale:
+                p.unlink()
+            for d in sorted(
+                (d for d in output_root.rglob("*") if d.is_dir()),
+                key=lambda x: len(x.parts), reverse=True,
+            ):
+                try:
+                    d.rmdir()  # drop now-empty dirs
+                except OSError:
+                    pass
+            questionary.print(f"Pruned {len(stale)} stale file(s).")
+        elif stale:
+            questionary.print(f"Left {len(stale)} stale file(s) in place.")
 
 
 def clean(store: TrackStore) -> None:

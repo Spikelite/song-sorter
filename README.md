@@ -125,8 +125,12 @@ The interactive menu (`python main.py`) operates on a persistent track store
 
 ### Output
 - **Final-final** — For each artist/song group, pick the best copy (largest
-  MP3) and copy its files into an output tree organized as
+  MP3) and export its files into an output tree organized as
   `<output>/<first-letter>/<artist>/<name>.<ext>`, skipping unknown artists.
+  The output directory is prompted and **remembered** between runs. Re-running
+  is safe and incremental — files already present and unchanged are skipped —
+  and it can optionally **prune** stale files left by earlier runs (e.g. after
+  an artist was renamed), touching only its own `<prefix>/<artist>/<file>` layout.
 - **Exit** — Leave the menu (the store is saved on the way out).
 
 ## Data & files
@@ -139,6 +143,8 @@ State lives under `.cache/song-sorter/` (git-ignored):
   Written atomically, and checkpointed during long **Detail** runs.
 - **`review-state.json`** — per-track review decisions (e.g. `ok`), kept
   separate from the track data so re-running cleanup never loses review progress.
+- **`config.json`** — remembered settings (currently the **Final-final** output
+  directory).
 
 Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
 
