@@ -7,6 +7,7 @@ import re
 import shutil
 import socket
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -904,6 +905,7 @@ def _mb_sim(a: str, b: str) -> float:
     the score against MusicBrainz's clean title."""
     def clean(s):
         s = _MB_NOISE_RE.sub(" ", s)
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
         return re.sub(r"[^a-z0-9 ]", " ", s.lower())
     return rapidfuzz.fuzz.token_sort_ratio(clean(a), clean(b))
 
@@ -916,6 +918,17 @@ def _mb_search(artist: str, title: str) -> list:
     qt = _mb_escape(_mb_norm(title))
     q = f'artist:"{qa}" AND recording:"{qt}"'
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "5"})
+    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.load(resp).get("recordings", [])
+
+
+def _mb_search_title(title: str) -> list:
+    """Search MusicBrainz by title only (for the conservative third pass),
+    returning more candidates so the caller can match our artist against their
+    credits. Raises on network error."""
+    q = f'recording:"{_mb_escape(_mb_norm(title))}"'
+    url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "20"})
     req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.load(resp).get("recordings", [])
@@ -980,12 +993,12 @@ def musicbrainz_lookup(store: TrackStore) -> None:
             key = (a.lower(), s.lower())
             try:
                 if key in pair_cache:
-                    na, nt, ma, mt, was_swap = pair_cache[key]
+                    na, nt, ma, mt, was_swap, via_title = pair_cache[key]
                 else:
                     res = _mb_search(a, s)
                     time.sleep(1.1)  # MusicBrainz: ~1 req/sec
                     na, nt, ma, mt = _mb_best(res, a, s)
-                    was_swap = False
+                    was_swap = via_title = False
                     if not (na >= _MB_STRONG and nt >= _MB_STRONG):
                         # Try the reversed orientation to catch swapped parses.
                         res2 = _mb_search(s, a)
@@ -993,7 +1006,16 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                         sa, st_, sma, smt = _mb_best(res2, s, a)
                         if sa >= _MB_STRONG and st_ >= _MB_STRONG:
                             na, nt, ma, mt, was_swap = sa, st_, sma, smt, True
-                    pair_cache[key] = (na, nt, ma, mt, was_swap)
+                    if not (na >= _MB_STRONG and nt >= _MB_STRONG):
+                        # Conservative third pass: title-only search, accept only
+                        # if our artist AND title both strongly match a returned
+                        # recording (rejects same-title/different-artist noise).
+                        res3 = _mb_search_title(s)
+                        time.sleep(1.1)
+                        ta, tt, tma, tmt = _mb_best(res3, a, s)
+                        if ta >= _MB_STRONG and tt >= _MB_STRONG:
+                            na, nt, ma, mt, via_title = ta, tt, tma, tmt, True
+                    pair_cache[key] = (na, nt, ma, mt, was_swap, via_title)
                 consecutive_fail = 0
             except Exception:
                 consecutive_fail += 1
@@ -1009,11 +1031,11 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                     store.add(t)
                     swapped += 1
                 review_state.set(t.path, "ok")
-                t.metadata["mb_match"] = "swap" if was_swap else "ok"
+                kind = "swap" if was_swap else ("title" if via_title else "ok")
+                t.metadata["mb_match"] = kind
                 okd += 1
                 if verbose:
-                    act = "swap" if was_swap else "ok"
-                    tqdm.write(f"{act:5} {a!r} - {s!r}  ->  mb {ma!r}/{mt!r}  (a={na:.0f} t={nt:.0f})")
+                    tqdm.write(f"{kind:5} {a!r} - {s!r}  ->  mb {ma!r}/{mt!r}  (a={na:.0f} t={nt:.0f})")
             elif na >= _MB_WEAK and nt >= _MB_WEAK:
                 # A recording exists but diverges -- keep for review, don't apply.
                 t.metadata["mb_match"] = "flag"
