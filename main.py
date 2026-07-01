@@ -30,6 +30,7 @@ from review_state import ReviewState
 _CACHE_PATH = Path(__file__).parent / ".cache" / "song-sorter" / "cache.json"
 _REVIEW_STATE_PATH = _CACHE_PATH.parent / "review-state.json"
 _CONFIG_PATH = _CACHE_PATH.parent / "config.json"
+_RESOLUTIONS_PATH = _CACHE_PATH.parent / "resolutions.json"
 
 
 def _load_config() -> dict:
@@ -1273,6 +1274,81 @@ def review_mode(store: TrackStore) -> None:
         if advance:
             i += 1
 
+
+def apply_resolutions(store: TrackStore) -> None:
+    """Apply a curated resolutions file to the store (dry-run first).
+
+    Reads `resolutions.json` next to the cache — shape:
+        {"version": 1, "resolutions": {"<track path>": {"artist": ..., "song":
+        ..., "why": ...}}}
+    For each path present in the store it sets the artist/song and marks the
+    track reviewed ('ok'), recording provenance in metadata ('artist_from' =
+    'resolutions'). Entries missing 'artist'/'song' leave that field unchanged.
+    Paths not in the store are skipped and counted. Prompts for a dry run first
+    so the whole change set can be eyeballed before anything is written."""
+    p = Path(_RESOLUTIONS_PATH)
+    if not p.exists():
+        questionary.print(f"No resolutions file at {p}.")
+        return
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError) as exc:
+        questionary.print(f"Could not read resolutions: {exc}")
+        return
+    res = data.get("resolutions", {})
+    if not res:
+        questionary.print("Resolutions file has no entries.")
+        return
+
+    dry = questionary.confirm(
+        f"{len(res)} resolutions found. Dry run (show changes without writing)?",
+        default=True,
+    ).ask()
+    if dry is None:
+        return
+
+    review_state = ReviewState()
+    review_state.load(_REVIEW_STATE_PATH)
+
+    applied = missing = unchanged = 0
+    for path, r in res.items():
+        track = store.get(path)
+        if track is None:
+            missing += 1
+            continue
+        new_artist = r.get("artist", track.artist)
+        new_song = r.get("song", track.song)
+        changed = new_artist != track.artist or new_song != track.song
+        if not changed and review_state.get(path) == "ok":
+            unchanged += 1
+            continue
+        questionary.print(
+            f"{'[dry] ' if dry else ''}{Path(path).stem}\n"
+            f"    '{track.artist} - {track.song}'  ->  '{new_artist} - {new_song}'"
+            f"    ({r.get('why', '')})"
+        )
+        if not dry:
+            track.artist = new_artist
+            track.song = new_song
+            track.metadata["artist_from"] = "resolutions"
+            store.add(track)
+            review_state.set(path, "ok")
+            applied += 1
+
+    if dry:
+        questionary.print(
+            f"Dry run: {len(res)} entries ({missing} not in this store). "
+            "Re-run and answer 'no' to apply."
+        )
+    else:
+        store.save(_CACHE_PATH)
+        review_state.save(_REVIEW_STATE_PATH)
+        questionary.print(
+            f"Applied {applied}; skipped {missing} not-in-store, {unchanged} already-set."
+        )
+
+
 def report_track_count(store: TrackStore) -> None:
     """ List a summary of track information """
     all_songs = set(f"{clean_artist(t.artist)} - {clean_song(t.song)}" for t in store.all()
@@ -1736,6 +1812,7 @@ def run_interactive(store: TrackStore) -> None:
         "tag-review",
         "tag-swap",
         "musicbrainz",
+        "apply-resolutions",
         "fixup",
         "fix-artist",
         "fix-unknown",
@@ -1796,6 +1873,8 @@ def run_interactive(store: TrackStore) -> None:
             swap_from_tags(store)
         elif result == "musicbrainz":
             musicbrainz_lookup(store)
+        elif result == "apply-resolutions":
+            apply_resolutions(store)
         elif result == "fixup":
             browse_fixup(store)
         elif result == "fix-artist":

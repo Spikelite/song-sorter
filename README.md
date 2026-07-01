@@ -94,6 +94,12 @@ The interactive menu (`python main.py`) operates on a persistent track store
   tracks previously scored none/flag/suggest (e.g. after matching improvements).
   **Offline-safe** — skips cleanly without internet, rate-limited,
   cached/resumable, and never part of an offline batch.
+- **Apply-resolutions** — Apply a curated `resolutions.json` (produced offline,
+  e.g. with assistance) that maps track paths to a corrected `artist`/`song`.
+  Prompts for a **dry run** first so the entire change set can be reviewed, then
+  on a real run sets the fields, marks each track reviewed, and records
+  provenance (`artist_from = resolutions`). Paths not in the store are skipped;
+  entries that omit a field leave it unchanged.
 - **Fixup** — Browse only the not-yet-reviewed tracks from thin artists,
   grouped by artist, for editing.
 - **Fix-artist** — Browse all artists; drilling into one lets you **bulk
