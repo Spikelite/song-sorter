@@ -31,6 +31,7 @@ _CACHE_PATH = Path(__file__).parent / ".cache" / "song-sorter" / "cache.json"
 _REVIEW_STATE_PATH = _CACHE_PATH.parent / "review-state.json"
 _CONFIG_PATH = _CACHE_PATH.parent / "config.json"
 _RESOLUTIONS_PATH = _CACHE_PATH.parent / "resolutions.json"
+_ARTIST_ALIASES_PATH = _CACHE_PATH.parent / "artist-aliases.json"
 
 
 def _load_config() -> dict:
@@ -1349,6 +1350,70 @@ def apply_resolutions(store: TrackStore) -> None:
         )
 
 
+def unify_artists(store: TrackStore) -> None:
+    """Bulk-rename artist variants to a canonical spelling from an alias map.
+
+    Reads `artist-aliases.json` next to the cache — shape:
+        {"version": 1, "aliases": {"<variant artist>": "<canonical>", ...}}
+    For every track whose exact artist string matches a key, rewrites it to the
+    canonical form. Prompts for a dry run first so the full rename set can be
+    reviewed. Only the artist field changes; review state is left untouched."""
+    p = Path(_ARTIST_ALIASES_PATH)
+    if not p.exists():
+        questionary.print(f"No alias file at {p}.")
+        return
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError) as exc:
+        questionary.print(f"Could not read aliases: {exc}")
+        return
+    aliases = {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
+    if not aliases:
+        questionary.print("Alias file has no usable entries.")
+        return
+
+    dry = questionary.confirm(
+        f"{len(aliases)} artist aliases loaded. Dry run (show renames without writing)?",
+        default=True,
+    ).ask()
+    if dry is None:
+        return
+
+    per_alias: dict[str, int] = {}
+    renamed = 0
+    for t in store.all():
+        canon = aliases.get(t.artist)
+        if canon is None:
+            continue
+        per_alias[t.artist] = per_alias.get(t.artist, 0) + 1
+        renamed += 1
+        if not dry:
+            t.artist = canon
+            store.add(t)
+
+    ordered = sorted(per_alias, key=lambda k: -per_alias[k])
+    shown = ordered if len(ordered) <= 80 else ordered[:80]
+    for variant in shown:
+        questionary.print(
+            f"{'[dry] ' if dry else ''}'{variant}' -> '{aliases[variant]}'"
+            f"  ({per_alias[variant]} track(s))"
+        )
+    if len(ordered) > len(shown):
+        questionary.print(f"    ... and {len(ordered) - len(shown)} more variant(s)")
+
+    if dry:
+        questionary.print(
+            f"Dry run: {len(per_alias)}/{len(aliases)} aliases match tracks, "
+            f"{renamed} track(s) would be renamed. Re-run and answer 'no' to apply."
+        )
+    else:
+        store.save(_CACHE_PATH)
+        questionary.print(
+            f"Renamed {renamed} track(s) across {len(per_alias)} variant(s)."
+        )
+
+
 def report_track_count(store: TrackStore) -> None:
     """ List a summary of track information """
     all_songs = set(f"{clean_artist(t.artist)} - {clean_song(t.song)}" for t in store.all()
@@ -1813,6 +1878,7 @@ def run_interactive(store: TrackStore) -> None:
         "tag-swap",
         "musicbrainz",
         "apply-resolutions",
+        "unify-artists",
         "fixup",
         "fix-artist",
         "fix-unknown",
@@ -1875,6 +1941,8 @@ def run_interactive(store: TrackStore) -> None:
             musicbrainz_lookup(store)
         elif result == "apply-resolutions":
             apply_resolutions(store)
+        elif result == "unify-artists":
+            unify_artists(store)
         elif result == "fixup":
             browse_fixup(store)
         elif result == "fix-artist":

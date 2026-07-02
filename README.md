@@ -100,6 +100,13 @@ The interactive menu (`python main.py`) operates on a persistent track store
   on a real run sets the fields, marks each track reviewed, and records
   provenance (`artist_from = resolutions`). Paths not in the store are skipped;
   entries that omit a field leave it unchanged.
+- **Unify-artists** — Merge duplicate/variant artist spellings to one canonical
+  name using a curated `artist-aliases.json` (`{variant: canonical}`). Prompts
+  for a **dry run** first (lists every rename and how many tracks it touches),
+  then on a real run rewrites the `artist` field on all matching tracks. Only
+  the artist field changes — review state is left untouched. Useful for
+  collapsing e.g. `beatles`/`The Beatles` or `alanis morisette`/`Alanis
+  Morissette` into a single artist across the library (and the output tree).
 - **Fixup** — Browse only the not-yet-reviewed tracks from thin artists,
   grouped by artist, for editing.
 - **Fix-artist** — Browse all artists; drilling into one lets you **bulk
