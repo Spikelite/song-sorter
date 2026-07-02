@@ -61,6 +61,11 @@ The interactive menu (`python main.py`) operates on a persistent track store
 - **Song** — Browse the library grouped by **song title**.
 - **List** — Print a summary: distinct `artist - song` pairs versus total
   track count (ignoring unknown artists).
+- **Stats** — Print a read-only statistics report about the library: totals
+  (files, distinct songs, distinct artists, unknown-artist files), duplicate
+  copies, format breakdown, total audio hours and MP3+CDG size, average song
+  length/bitrate, top artists by distinct songs, most-duplicated songs, and a
+  decade distribution (from ID3 year tags).
 
 ### Reviewing & manual fixes
 - **Review** — Step through tracks from "thin" artists (artists with ≤5

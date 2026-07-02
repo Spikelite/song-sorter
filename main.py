@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import re
 import shutil
@@ -1420,6 +1421,98 @@ def report_track_count(store: TrackStore) -> None:
         if t.artist.lower() not in ["unknown", ""])
     questionary.print(f"Distinct count: {len(all_songs)} / {len(store.all())}")
 
+
+def library_stats(store: TrackStore) -> None:
+    """Print interesting statistics about the library (read-only)."""
+    tracks = store.all()
+    total = len(tracks)
+    if not total:
+        questionary.print("Library is empty.")
+        return
+
+    def _int(v):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return 0
+
+    artist_songs: dict[str, set] = collections.defaultdict(set)
+    artist_display: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    pair_copies: collections.Counter = collections.Counter()
+    pair_display: dict[tuple, str] = {}
+    fmt: collections.Counter = collections.Counter()
+    decades: collections.Counter = collections.Counter()
+    total_seconds = 0.0
+    total_bytes = 0
+    bitrates: list[int] = []
+    detailed = unknown = 0
+
+    for t in tracks:
+        a = t.artist
+        ca, cs = clean_artist(a), clean_song(t.song)
+        is_unknown = a.lower() in ("unknown", "")
+        unknown += is_unknown
+        for ext in t.file_types:
+            fmt[ext] += 1
+        md = t.metadata
+        total_seconds += _int(md.get("length_seconds"))  # rounded secs, fine for a sum
+        total_bytes += _int(md.get("mp3_size")) + _int(md.get("cdg_size"))
+        br = _int(md.get("bitrate_bps"))
+        if br:
+            bitrates.append(br)
+        if md.get("length_seconds"):
+            detailed += 1
+        ym = re.search(r"(19|20)\d\d", md.get("tag_year", "") or "")
+        if ym:
+            decades[(int(ym.group()) // 10) * 10] += 1
+        if not is_unknown and cs:
+            artist_songs[ca].add(cs)
+            artist_display[ca][a] += 1
+            pair_copies[(ca, cs)] += 1
+            pair_display.setdefault((ca, cs), f"{a} - {t.song}")
+
+    distinct_pairs = len(pair_copies)
+    dupes = sum(c - 1 for c in pair_copies.values())
+
+    def hrs(sec):
+        return f"{sec / 3600:,.0f}h ({sec / 86400:.1f} days)"
+
+    def name(counter):
+        return counter.most_common(1)[0][0]
+
+    L = questionary.print
+    L("=== Library statistics ===")
+    L(f"Track files:            {total:,}")
+    L(f"Distinct songs:         {distinct_pairs:,}  (artist+song, spelling-normalized)")
+    L(f"Distinct artists:       {len(artist_songs):,}")
+    L(f"Unknown-artist files:   {unknown:,}")
+    L(f"Duplicate copies:       {dupes:,}  ({dupes / total:.0%} of files are extra copies)")
+    L(f"Formats:                " + ", ".join(f"{k}={v:,}" for k, v in fmt.most_common()))
+    L("")
+    L(f"Detailed (have MP3 info): {detailed:,} / {total:,}")
+    L(f"Total audio:            {hrs(total_seconds)}")
+    L(f"Total MP3+CDG size:     {total_bytes / 1e9:,.1f} GB")
+    if detailed:
+        L(f"Avg song length:        {int(total_seconds / detailed) // 60}m {int(total_seconds / detailed) % 60}s")
+    if bitrates:
+        L(f"Avg MP3 bitrate:        {sum(bitrates) // len(bitrates) // 1000} kbps")
+    L("")
+    L("Top 15 artists by distinct songs:")
+    top_artists = sorted(artist_songs, key=lambda k: -len(artist_songs[k]))[:15]
+    for i, ca in enumerate(top_artists, 1):
+        L(f"  {i:>2}. {name(artist_display[ca])}  —  {len(artist_songs[ca]):,}")
+    L("")
+    L("Most-duplicated songs (copies in library):")
+    for (key, n) in pair_copies.most_common(10):
+        if n < 2:
+            break
+        L(f"  {n:>3}  {pair_display[key]}")
+    if decades:
+        L("")
+        L("Songs by decade (from ID3 year):")
+        for d in sorted(decades):
+            L(f"  {d}s  {decades[d]:,}")
+
 def _best_track(tracks: list[Track]) -> Track:
     """ Pick one track to represent an artist-song pair."""
     
@@ -1875,6 +1968,7 @@ def run_interactive(store: TrackStore) -> None:
         "song",
         "final-final",
         "list",
+        "stats",
         "review",
         "tag-review",
         "tag-swap",
@@ -1933,6 +2027,8 @@ def run_interactive(store: TrackStore) -> None:
             tracks_to_keep(store)
         elif result == "list":
             report_track_count(store)
+        elif result == "stats":
+            library_stats(store)
         elif result == "review":
             review_mode(store)
         elif result == "tag-review":
