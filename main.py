@@ -1613,6 +1613,228 @@ def tracks_to_keep(store: TrackStore) -> None:
         elif stale:
             questionary.print(f"Left {len(stale)} stale file(s) in place.")
 
+    # Keep the digital songbook in the output tree current with this export.
+    book, n = build_songbook(store, output_root / "songbook.html",
+                             cfg.get("songbook_name", ""))
+    questionary.print(f"Songbook refreshed -> {book} ({n:,} songs)")
+
+
+# Single-file offline songbook. Everything (styles, script, data) is inlined so
+# the generated file works by double-clicking it in any browser, no internet or
+# install needed. Raw string: JS escapes like ̀ and "\t" must reach the
+# browser verbatim.
+_SONGBOOK_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{--bg:#14161a;--panel:#1e2128;--text:#e8eaed;--dim:#9aa0a6;--accent:#4fc3f7;--line:#22252c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,Arial,sans-serif}
+header{position:sticky;top:0;background:var(--panel);padding:10px 14px;box-shadow:0 2px 8px rgba(0,0,0,.5);z-index:2}
+h1{margin:0 0 8px;font-size:20px}
+h1 small{color:var(--dim);font-weight:normal;font-size:13px;margin-left:8px}
+#q{width:100%;font-size:22px;padding:12px 14px;border-radius:10px;border:1px solid #333;background:var(--bg);color:var(--text)}
+#q:focus{outline:2px solid var(--accent)}
+.filters{display:flex;gap:8px;margin-top:8px}
+.filters button{font-size:15px;padding:8px 16px;border-radius:999px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.filters button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:600}
+.alpha{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+.alpha button{flex:1;min-width:30px;font-size:14px;padding:6px 0;border-radius:6px;border:1px solid #3a3f47;background:var(--bg);color:var(--dim);cursor:pointer}
+.alpha button.on{background:var(--accent);color:#00222f;border-color:var(--accent);font-weight:700}
+#meta{color:var(--dim);font-size:14px;padding:10px 16px}
+#list{padding:0 10px 40px}
+.artist{font-size:17px;font-weight:700;color:var(--accent);padding:14px 8px 4px;border-bottom:1px solid #2c3038;cursor:pointer}
+.song{font-size:18px;padding:10px 8px 10px 24px;border-bottom:1px solid var(--line);cursor:pointer}
+.details{font-size:14px;color:var(--dim);padding:2px 8px 12px 24px;border-bottom:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+<h1>__TITLE__ <small>__COUNT__ songs &middot; __DATE__</small></h1>
+<input id="q" type="search" placeholder="Search artist or song&hellip;" autofocus>
+<div class="filters" id="filters"><button data-f="all">All</button><button data-f="artist">Artist</button><button data-f="song">Song title</button></div>
+<div class="alpha" id="alpha"></div>
+</header>
+<div id="meta"></div>
+<div id="list"></div>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const RAW=JSON.parse(document.getElementById("data").textContent);
+const norm=s=>s.normalize("NFKD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]+/g," ").replace(/ +/g," ").trim();
+const ITEMS=RAW.map(l=>{const p=l.split("\t");return{a:p[0],s:p[1],m:p[2]||"",na:norm(p[0]),ns:norm(p[1])};});
+const MAX=400;
+let filter="all",letter="";
+const q=document.getElementById("q"),list=document.getElementById("list"),meta=document.getElementById("meta");
+const fbar=document.getElementById("filters"),abar=document.getElementById("alpha");
+"#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(ch=>{const b=document.createElement("button");b.textContent=ch;b.onclick=()=>{letter=(letter===ch)?"":ch;sync();render();};abar.appendChild(b);});
+function sync(){[...abar.children].forEach(b=>b.classList.toggle("on",b.textContent===letter));[...fbar.children].forEach(b=>b.classList.toggle("on",b.dataset.f===filter));}
+fbar.addEventListener("click",e=>{const f=e.target.dataset.f;if(!f)return;filter=f;sync();render();});
+let timer;q.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(render,120);});
+const letterOf=na=>{const c=na.charAt(0);return c>="a"&&c<="z"?c.toUpperCase():"#";};
+function render(){
+ const toks=norm(q.value).split(" ").filter(Boolean);
+ let total=0;const out=[];
+ for(const it of ITEMS){
+  if(letter&&letterOf(it.na)!==letter)continue;
+  const hay=filter==="artist"?it.na:filter==="song"?it.ns:it.na+" "+it.ns;
+  let ok=true;for(const tk of toks){if(hay.indexOf(tk)<0){ok=false;break;}}
+  if(!ok)continue;
+  total++;if(out.length<MAX)out.push(it);
+ }
+ const frag=document.createDocumentFragment();let last=null;
+ for(const it of out){
+  if(it.a!==last){last=it.a;const h=document.createElement("div");h.className="artist";h.textContent=it.a;
+   h.onclick=()=>{q.value=it.a;filter="artist";letter="";sync();render();};frag.appendChild(h);}
+  const d=document.createElement("div");d.className="song";d.textContent=it.s;
+  d.onclick=()=>{const n=d.nextElementSibling;
+   if(n&&n.classList.contains("details")){n.remove();return;}
+   document.querySelectorAll(".details").forEach(x=>x.remove());
+   const dd=document.createElement("div");dd.className="details";
+   dd.textContent=it.m||"No details available.";d.after(dd);};
+  frag.appendChild(d);
+ }
+ list.replaceChildren(frag);
+ meta.textContent=total===0?"No matches.":(total>out.length?total.toLocaleString()+" matches - showing first "+out.length+". Keep typing to narrow.":total.toLocaleString()+(total===1?" match.":" matches."));
+}
+sync();render();
+</script>
+</body>
+</html>"""
+
+
+# Karaoke-brand noise stripped from songbook *display* strings: "[SC Karaoke]"
+# style brackets and known technical parentheticals. Deliberately narrow so real
+# parentheticals like "(I've Had) The Time of My Life" survive.
+_BOOK_BRACKET_RE = re.compile(r"\s*\[[^\]]*karaoke[^\]]*\]", re.IGNORECASE)
+_BOOK_PAREN_RE = re.compile(
+    r"\s*\((?:wo?bgv|w/?bgv|no bgv|bgv|wvocals?|vr|multiplex|mplx|"
+    r"no backing vocals?|instr\.?|instrumental(?: version)?)\)",
+    re.IGNORECASE,
+)
+
+
+def _book_display(s: str) -> str:
+    s = _BOOK_BRACKET_RE.sub("", s or "")
+    s = _BOOK_PAREN_RE.sub("", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _songbook_entries(store: TrackStore) -> list[tuple[str, str, str]]:
+    """Distinct (artist, song, details) rows for the songbook.
+
+    Display strings are stripped of karaoke-brand noise first, then deduped
+    with the same normalization List/Stats use (so bracket variants of one
+    title collapse together); shows the most-common spelling of each artist
+    and title. Details describe the best copy — the same pick Final-final
+    exports: duration, bitrate, format, year and album where available."""
+    artist_names: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    song_names: dict[tuple, collections.Counter] = collections.defaultdict(collections.Counter)
+    pair_tracks: dict[tuple, list[Track]] = collections.defaultdict(list)
+    for t in store.all():
+        if t.artist.lower() in ("unknown", ""):
+            continue
+        da, ds = _book_display(t.artist), _book_display(t.song)
+        ca, cs = clean_artist(da), clean_song(ds)
+        if not ca or not cs:
+            continue
+        artist_names[ca][da] += 1
+        song_names[(ca, cs)][ds] += 1
+        pair_tracks[(ca, cs)].append(t)
+
+    def fold(s: str) -> str:  # accent-insensitive sort key
+        return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+
+    def details(group: list[Track]) -> str:
+        # "Length: 3:47 @ 192 kbps · 2007 · Album" — time @ bitrate, then the rest.
+        md = _best_track(group).metadata
+        head = ""
+        try:
+            sec = int(float(md.get("length_seconds", "")))
+            head = f"Length: {sec // 60}:{sec % 60:02d}"
+        except ValueError:
+            pass
+        try:
+            kbps = f"{int(md.get('bitrate_bps', '')) // 1000} kbps"
+            head = f"{head} @ {kbps}" if head else kbps
+        except ValueError:
+            pass
+        parts = [head] if head else []
+        ym = re.search(r"(19|20)\d\d", md.get("tag_year", "") or "")
+        if ym:
+            parts.append(ym.group())
+        album = md.get("tag_album", "")
+        if album and album != "<not-found>":
+            parts.append(album[:48])
+        return " · ".join(parts)
+
+    entries = [
+        (
+            artist_names[key[0]].most_common(1)[0][0],
+            names.most_common(1)[0][0],
+            details(pair_tracks[key]),
+        )
+        for key, names in song_names.items()
+    ]
+    entries.sort(key=lambda e: (fold(e[0]), fold(e[1])))
+    return entries
+
+
+def build_songbook(store: TrackStore, output_file: Path, name: str = "") -> tuple[Path, int]:
+    """Generate the single-file offline songbook HTML at output_file.
+
+    `name` personalizes the title ("<name>'s Karaoke Songbook"). Entries are
+    embedded as JSON "artist\\tsong\\tdetails" lines; '</' is escaped so no
+    title can terminate the script block early."""
+    entries = _songbook_entries(store)
+    tab = chr(9)
+    lines = [
+        f"{a.replace(tab, ' ')}\t{s.replace(tab, ' ')}\t{m.replace(tab, ' ')}"
+        for a, s, m in entries
+    ]
+    data = json.dumps(lines, ensure_ascii=False).replace("</", "<\\/")
+    title = f"{name}'s Karaoke Songbook" if name else "Karaoke Songbook"
+    title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    html = (
+        _SONGBOOK_TEMPLATE
+        .replace("__TITLE__", title)
+        .replace("__COUNT__", f"{len(entries):,}")
+        .replace("__DATE__", time.strftime("%Y-%m-%d"))
+        .replace("__DATA__", data)
+    )
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(html, encoding="utf-8")
+    return output_file, len(entries)
+
+
+def songbook(store: TrackStore) -> None:
+    """Menu command: generate the songbook to a prompted, remembered path,
+    with a remembered owner name for the title."""
+    cfg = _load_config()
+    name = questionary.text(
+        "Name for the book title (\"<name>'s Karaoke Songbook\"; blank for plain):",
+        default=cfg.get("songbook_name", ""),
+    ).ask()
+    if name is None:
+        return
+    name = name.strip()
+    default = cfg.get("songbook_path") or (
+        str(Path(cfg["output_path"]) / "songbook.html")
+        if cfg.get("output_path") else str(_CACHE_PATH.parent / "songbook.html")
+    )
+    out = questionary.path("Songbook output file:", default=default).ask()
+    if not out or not out.strip():
+        return
+    out = out.strip()
+    cfg["songbook_name"] = name
+    cfg["songbook_path"] = out
+    _save_config(cfg)
+    book, n = build_songbook(store, Path(out), name)
+    questionary.print(f"Songbook -> {book} ({n:,} songs)")
+
 
 def clean(store: TrackStore) -> None:
     """ Remove frequent karaoke descriptors """
@@ -1967,6 +2189,7 @@ def run_interactive(store: TrackStore) -> None:
         "artist",
         "song",
         "final-final",
+        "songbook",
         "list",
         "stats",
         "review",
@@ -2001,7 +2224,7 @@ def run_interactive(store: TrackStore) -> None:
         ("Review & fix", ["review", "fixup", "fix-artist", "fix-unknown"]),
         ("Organize", ["unify-artists"]),
         ("Inspect", ["browse", "artist", "song", "list", "stats"]),
-        ("Output", ["final-final"]),
+        ("Output", ["final-final", "songbook"]),
     ]
     advanced = ["clean", "tag-fill", "unswap", "uncomma", "trailing-article",
                 "ungroup", "fuzz", "fuzz_song"]
@@ -2059,6 +2282,8 @@ def run_interactive(store: TrackStore) -> None:
             browse_song(store)
         elif result == "final-final":
             tracks_to_keep(store)
+        elif result == "songbook":
+            songbook(store)
         elif result == "list":
             report_track_count(store)
         elif result == "stats":

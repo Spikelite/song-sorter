@@ -157,6 +157,16 @@ The interactive menu (`python main.py`) operates on a persistent track store
   is safe and incremental — files already present and unchanged are skipped —
   and it can optionally **prune** stale files left by earlier runs (e.g. after
   an artist was renamed), touching only its own `<prefix>/<artist>/<file>` layout.
+  Also refreshes a `songbook.html` in the output root (see **Songbook**).
+- **Songbook** — Generate the digital songbook: a **single self-contained HTML
+  file** with every distinct artist+song embedded, searchable instantly in any
+  browser — fully offline, zero install, just double-click it. Guest-friendly
+  (touch-sized rows, big search box) with artist/title filters and an A–Z
+  browse bar; tapping an artist header lists everything by that artist, and
+  tapping a song reveals details of the best copy (duration, bitrate, format,
+  year, album). The title is personalized (`<name>'s Karaoke Songbook`); name
+  and output path are prompted and **remembered**. Regenerate any time the
+  library changes; **Final-final** also drops a fresh copy into the output tree.
 - **Exit** — Leave the menu (the store is saved on the way out).
 
 ## Data & files
@@ -169,8 +179,8 @@ State lives under `.cache/song-sorter/` (git-ignored):
   Written atomically, and checkpointed during long **Detail** runs.
 - **`review-state.json`** — per-track review decisions (e.g. `ok`), kept
   separate from the track data so re-running cleanup never loses review progress.
-- **`config.json`** — remembered settings (currently the **Final-final** output
-  directory).
+- **`config.json`** — remembered settings (the **Final-final** output
+  directory and the **Songbook** output path).
 
 Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
 
