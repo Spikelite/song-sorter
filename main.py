@@ -1475,7 +1475,9 @@ def tracks_to_keep(store: TrackStore) -> None:
 
     # Copy anything missing or changed; skip files already present and identical.
     copied = skipped = missing = 0
-    for dest, src in expected.items():
+    for dest, src in tqdm(
+        expected.items(), total=len(expected), desc="Exporting", unit="file"
+    ):
         if not src.exists():
             missing += 1
             continue
@@ -1504,7 +1506,7 @@ def tracks_to_keep(store: TrackStore) -> None:
             f"Prune {len(stale)} stale output file(s) no longer in the keep set?",
             default=False,
         ).ask():
-            for p in stale:
+            for p in tqdm(stale, desc="Pruning", unit="file"):
                 p.unlink()
             for d in sorted(
                 (d for d in output_root.rglob("*") if d.is_dir()),
