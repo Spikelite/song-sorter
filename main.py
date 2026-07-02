@@ -1990,21 +1990,55 @@ def run_interactive(store: TrackStore) -> None:
         "exit",
     ]
     online = {"musicbrainz"}  # options that need internet, flagged in the menu
-    choices = [
-        Choice(o.capitalize() + (" (online)" if o in online else ""), value=o)
-        for o in options
+
+    # Menu layout: workflow-ordered sections for the main screen; the granular
+    # one-off cleaners live in an Advanced submenu (All-clean chains them). The
+    # flat `options` list above stays the source of truth for the docs test.
+    sections = [
+        ("Build library", ["search", "detail", "refresh"]),
+        ("Clean & identify  (run in order)",
+         ["all-clean", "tag-review", "tag-swap", "musicbrainz", "apply-resolutions"]),
+        ("Review & fix", ["review", "fixup", "fix-artist", "fix-unknown"]),
+        ("Organize", ["unify-artists"]),
+        ("Inspect", ["browse", "artist", "song", "list", "stats"]),
+        ("Output", ["final-final"]),
     ]
+    advanced = ["clean", "tag-fill", "unswap", "uncomma", "trailing-article",
+                "ungroup", "fuzz", "fuzz_song"]
+
+    def _label(key):
+        return key.capitalize() + (" (online)" if key in online else "")
+
+    # Guard against drift: every documented option must be placed in the layout.
+    _placed = {k for _, keys in sections for k in keys} | set(advanced) | {"exit"}
+    assert _placed == set(options), f"menu layout != options: {_placed ^ set(options)}"
+
+    main_choices = []
+    for _title, _keys in sections:
+        main_choices.append(questionary.Separator(f"── {_title} ──"))
+        main_choices.extend(Choice(_label(k), value=k) for k in _keys)
+    main_choices.append(questionary.Separator("── More ──"))
+    main_choices.append(Choice("Advanced cleanup ▸", value="__advanced__"))
+    main_choices.append(Choice("Exit", value="exit"))
+
+    advanced_choices = [Choice(_label(k), value=k) for k in advanced]
+    advanced_choices.append(Choice("(back)", value="__back__"))
 
     while True:
         result = questionary.select(
             "Select an option:",
-            choices=choices,
+            choices=main_choices,
         ).ask()
 
-        if result is None:
-            break  # User cancelled (Ctrl+C)
-        if result == "exit":
+        if result is None or result == "exit":
             break
+        if result == "__advanced__":
+            result = questionary.select(
+                "Advanced cleanup:", choices=advanced_choices
+            ).ask()
+            if result is None or result == "__back__":
+                continue
+
         if result == "search":
             path = import_path(_default_scan_dir(store))
             if path is not None:
