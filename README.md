@@ -29,8 +29,9 @@ operates on a persistent store, so you can stop and resume at any point.
 3. **All-clean** — deterministic text cleanup, run first so strings are clean
    before any corroboration: Clean → Trailing-article → Tag-fill → Uncomma →
    Ungroup → Fuzz → Fuzz_song.
-4. **Tag-review** — auto-accept tracks whose artist the ID3 tag corroborates.
-5. **Tag-swap** — fix reversed parses that the tag exposes.
+4. **Tag-swap** — fix reversed parses first, so they can't be mistaken for
+   correct ones downstream.
+5. **Tag-review** — auto-accept tracks whose artist the ID3 tag corroborates.
 6. **Musicbrainz** *(online)* — last-resort corroboration for the remainder.
 7. **Review** / **Fixup** — hand-fix whatever's left.
 8. **Final-final** — write one best copy per artist+song to the output tree.
@@ -73,7 +74,9 @@ The interactive menu (`python main.py`) operates on a persistent track store
   **auto-clean** the artist, **skip** (come back later), and — when a suggestion
   exists — **use MB** / **use tag** (from a prior Musicbrainz run, or the MP3's
   ID3 `tag_artist` as an offline fallback), which show and apply exactly which
-  field(s) they'll set (fields already matching are left alone). Only **ok** or
+  field(s) they'll set (fields already matching are left alone). Tracks whose
+  song field is a known artist get a **"probably swapped"** warning so they
+  aren't ok'd by reflex. Only **ok** or
   accepting a suggestion marks a track reviewed; **swap**/**edit**/**auto-clean**
   keep you on the same track so you can keep adjusting until it's right. `ok`/
   `skip` decisions are reused for identical entries within a session.
@@ -81,13 +84,20 @@ The interactive menu (`python main.py`) operates on a persistent track store
   artist is corroborated by the MP3's ID3 `tag_artist` (matched ignoring word
   order, catalog prefixes, karaoke suffixes, and `&`/`and`/`feat`). Clears the
   large "parse was already right" portion of the queue. Non-destructive — only
-  writes the review-state flag.
-- **Tag-swap** — Fix reversed parses using the tag as evidence: when
-  `tag_artist` matches the **song** field (not the artist) and that value is a
-  known artist (≥3 tracks) while the current artist is not, swap artist/song
-  and mark reviewed. The known-artist check guards against mislabeled tags
-  (e.g. Disney tracks whose ID3 artist is the song title), which are left for
-  manual review.
+  writes the review-state flag. **Swap guard:** tracks whose song field is a
+  known artist (while the artist field is not) are never auto-ok'd — on
+  reversed rips the tag is often reversed too — they're left for **Tag-swap**.
+- **Tag-swap** — Fix reversed artist/song parses. Two kinds of evidence, each
+  requiring the song-field value to be a **known artist** (≥3 tracks,
+  comma-aware: `Lavigne, Avril` counts) while the current artist is not:
+  the ID3 `tag_artist` matches the **song** field, or the song field is a
+  `Last, First` comma name (real titles essentially never look like that).
+  Scans the **whole store** — including tracks already marked reviewed — so a
+  swapped track that was wrongly ok'd earlier still gets corrected; a tag that
+  agrees with the current orientation vetoes tag-based swaps (but not
+  comma-form ones — reversed rips often carry reversed tags too). The known-artist
+  check guards against mislabeled tags (e.g. Disney tracks whose ID3 artist is
+  the song title), which are left for manual review.
 - **Musicbrainz** *(online)* — Last-resort corroboration for review tracks. It
   tries, in order: **artist + title**, the **reversed** orientation (to catch
   swapped parses), and a **title-only** search (accepted only when our artist

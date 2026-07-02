@@ -816,11 +816,17 @@ def auto_ok_from_tags(store: TrackStore) -> None:
     Non-destructive: only writes the review-state flag (reversible by deleting
     review-state.json). Tracks with no tag, or a tag whose tokens genuinely
     differ, are left untouched for manual review. Matching is order-insensitive
-    and ignores catalog prefixes, karaoke suffixes, and &/and/feat variations."""
+    and ignores catalog prefixes, karaoke suffixes, and &/and/feat variations.
+
+    Swap guard: a track whose SONG field is a known artist while its artist
+    field is not is never auto-ok'd here, even if the tag agrees -- on reversed
+    rips the ID3 tag is often reversed too, so agreement proves nothing. Those
+    are left for Tag-swap / manual review."""
+    known = set(ArtistIndex.from_store(store).count_artists(low_bound=3))
     review_state = ReviewState()
     review_state.load(_REVIEW_STATE_PATH)
 
-    okayed = 0
+    okayed = suspects = 0
     for t in _tracks_to_review(store, review_state):
         tag = t.metadata.get("tag_artist")
         if not tag or tag == "<not-found>":
@@ -828,23 +834,53 @@ def auto_ok_from_tags(store: TrackStore) -> None:
         a = _artist_tokens(t.artist)
         g = _artist_tokens(tag)
         if a and a == g:
+            if (clean_artist(t.artist) not in known
+                    and _song_as_known_artist(t.song, known)):
+                suspects += 1  # smells swapped; tag agreement is not trusted
+                continue
             review_state.set(t.path, "ok")
             okayed += 1
 
     review_state.save(_REVIEW_STATE_PATH)
-    questionary.print(f"Auto-ok'd {okayed} tracks corroborated by their ID3 tag")
+    questionary.print(
+        f"Auto-ok'd {okayed} tracks corroborated by their ID3 tag"
+        + (f"; left {suspects} swap-suspect(s) for Tag-swap/review" if suspects else "")
+    )
+
+
+def _song_as_known_artist(song: str, known: set) -> str | None:
+    """If the song field is (or comma-flips to) a known artist, return that
+    artist in natural word order; else None. 'Lavigne, Avril' -> 'Avril
+    Lavigne' -- clean_artist alone misses comma forms, which is exactly how a
+    batch of reversed tracks once evaded Tag-swap.
+
+    The comma flip is tried FIRST: 'Dion, Celine' should resolve to the real
+    'Celine Dion' (comma-form evidence) even when a 'Dion, Celine' spelling
+    group also exists in the store. Band names whose canonical spelling has a
+    comma ('Earth, Wind & Fire') don't flip to a known artist and fall through
+    to the direct match."""
+    if song.count(",") == 1:
+        flipped = _uncomma_artist(song)
+        if flipped and clean_artist(flipped) in known:
+            return flipped
+    if clean_artist(song) in known:
+        return song
+    return None
 
 
 def swap_from_tags(store: TrackStore) -> None:
-    """Fix reversed artist/song parses using the ID3 tag as evidence.
+    """Fix reversed artist/song parses.
 
-    When tag_artist matches the SONG field (not the artist), and that song
-    value is a known artist (>=3 tracks) while the current artist is not, the
-    parser reversed the two -- swap them and mark reviewed.
-
-    The known-artist check guards against mislabeled tags (e.g. Disney tracks
-    whose ID3 'artist' is actually the song title); those are left for manual
-    review rather than swapped."""
+    Two kinds of evidence, each requiring the song-field value to be a known
+    artist (>=3 tracks, comma-aware) while the current artist is not (guards
+    against mislabeled tags and titles that merely look like artist names):
+      - the ID3 tag_artist matches the SONG field, or
+      - the song field is a comma name ("Lavigne, Avril") -- real titles
+        essentially never look like Last, First of a known artist.
+    Scans the WHOLE store, including tracks already marked reviewed, so a
+    swapped track that was wrongly ok'd earlier still gets corrected. A tag
+    that corroborates the current orientation vetoes tag-based swaps (but not
+    comma-form ones -- reversed rips often have reversed tags too)."""
     index = ArtistIndex.from_store(store)
     known = set(index.count_artists(low_bound=3))
 
@@ -852,23 +888,36 @@ def swap_from_tags(store: TrackStore) -> None:
     review_state.load(_REVIEW_STATE_PATH)
 
     swapped = 0
-    for t in _tracks_to_review(store, review_state):
+    for t in store.all():
+        if t.artist.lower() in ("unknown", "") or not t.song:
+            continue
+        if "\\" in t.artist:
+            continue  # catalog-path artist: Clean's domain, and the title is
+            # lost anyway -- swapping would just lock in a garbage song field
+        if clean_artist(t.artist) in known:
+            continue  # current artist looks legit; don't second-guess it
+        flip = _song_as_known_artist(t.song, known)
+        if flip is None:
+            continue
         tag = t.metadata.get("tag_artist")
-        if not tag or tag == "<not-found>":
+        tg = _artist_tokens(tag) if tag and tag != "<not-found>" else frozenset()
+        comma_form = flip != t.song  # only true when the comma flip matched
+        # A tag agreeing with the current orientation vetoes tag-based swaps --
+        # but not comma-form ones: on reversed rips the tag is often reversed
+        # too, and no real title looks like "Last, First" of a known artist.
+        if not comma_form and tg and tg == _artist_tokens(t.artist):
             continue
-        tg, ar, so = _artist_tokens(tag), _artist_tokens(t.artist), _artist_tokens(t.song)
-        if not tg or not so or tg != so or tg == ar:
+        tag_says_song = bool(tg) and tg == _artist_tokens(t.song)
+        if not (tag_says_song or comma_form):
             continue
-        # Tag points at the song field. Only trust it if that value is a real
-        # artist elsewhere and the current artist is not (guards bad tags).
-        if clean_artist(t.song) in known and clean_artist(t.artist) not in known:
-            t.artist, t.song = t.song, t.artist
-            store.add(t)
-            review_state.set(t.path, "ok")
-            swapped += 1
+        questionary.print(f"swap: '{t.artist} - {t.song}' -> '{flip} - {t.artist}'")
+        t.artist, t.song = flip, t.artist
+        store.add(t)
+        review_state.set(t.path, "ok")
+        swapped += 1
 
     review_state.save(_REVIEW_STATE_PATH)
-    questionary.print(f"Swapped {swapped} reversed artist/song pairs (corroborated by ID3 tag)")
+    questionary.print(f"Swapped {swapped} reversed artist/song pairs")
 
 
 _MB_USER_AGENT = "song-sorter/1.0 ( https://github.com/Spikelite/song-sorter )"
@@ -1167,6 +1216,9 @@ def review_mode(store: TrackStore) -> None:
         questionary.print("No tracks from artists with 5 or fewer tracks.")
         return
 
+    # For the swapped-track warning: artists with >=3 tracks are "known".
+    known_artists = set(ArtistIndex.from_store(store).count_artists(low_bound=3))
+
     session_cache: dict[str, str] = {}
 
     base_choices = [
@@ -1190,6 +1242,13 @@ def review_mode(store: TrackStore) -> None:
             # Present track and prompt
             stem = Path(track.path).stem
             questionary.print(f"[{i + 1}/{len(tracks)}] {stem} -> '{track.artist} - {track.song}'")
+
+            flip = _song_as_known_artist(track.song, known_artists)
+            if flip and clean_artist(track.artist) not in known_artists:
+                questionary.print(
+                    f"    !! song field '{track.song}' is known artist '{flip}'"
+                    " - probably swapped"
+                )
 
             extra = []
             art_clean = clean_artist(track.artist)
@@ -2220,7 +2279,7 @@ def run_interactive(store: TrackStore) -> None:
     sections = [
         ("Build library", ["search", "detail", "refresh"]),
         ("Clean & identify  (run in order)",
-         ["all-clean", "tag-review", "tag-swap", "musicbrainz", "apply-resolutions"]),
+         ["all-clean", "tag-swap", "tag-review", "musicbrainz", "apply-resolutions"]),
         ("Review & fix", ["review", "fixup", "fix-artist", "fix-unknown"]),
         ("Organize", ["unify-artists"]),
         ("Inspect", ["browse", "artist", "song", "list", "stats"]),
