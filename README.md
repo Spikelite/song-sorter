@@ -135,12 +135,14 @@ The interactive menu (`python main.py`) operates on a persistent track store
   Uncomma → Ungroup → Fuzz → Fuzz_song.
 - **Clean** — Strip common karaoke descriptors (e.g. `wvocal`, `(Wobgv)`,
   `(Instrumental)`, `(Duet)`) and `[SC Karaoke]`-style **brand tags** from
-  artist/song fields, recording what was removed in `style` metadata. Left in
+  artist/song fields (descriptor parentheticals are matched
+  case-insensitively), recording what was removed in `style` metadata. Left in
   place, the brand tags split one song into several "distinct" titles,
-  duplicating **Final-final** exports. Also clears bare track-number artists
-  (a 1–2 digit `artist` like `04`, left by filenames such as
-  `EZH-31 - 04 - Milkshake`) to `Unknown`, preserving the number and catalog
-  id in metadata.
+  duplicating **Final-final** exports. Also clears bogus artists to `Unknown`
+  so the Unknown pipeline can reach them: bare track numbers (a 1–2 digit
+  `artist` like `04`, from filenames such as `EZH-31 - 04 - Milkshake`),
+  catalog-path fragments (`SC\SC-199\…`), and empty artists — preserving the
+  track number / catalog id in metadata.
 - **Tag-fill** — Fill `Unknown`/empty artists from the MP3's ID3 `tag_artist`,
   only for clean real-looking names (additive — never overwrites an existing
   artist). Ambiguous tags (bare numbers, catalog-style IDs) are kept and
@@ -192,8 +194,11 @@ State lives under `.cache/song-sorter/` (git-ignored):
   Written atomically, and checkpointed during long **Detail** runs.
 - **`review-state.json`** — per-track review decisions (e.g. `ok`), kept
   separate from the track data so re-running cleanup never loses review progress.
-- **`config.json`** — remembered settings (the **Final-final** output
-  directory and the **Songbook** output path).
+- **`config.json`** — remembered settings: the **Final-final** output
+  directory, the **Songbook** name and output path, and an optional
+  `"always_review"` list — artist groups (matched on the cleaned name) that
+  enter the **Review** queue regardless of size, for garbage buckets that
+  would otherwise outgrow the thin-artist threshold and become invisible.
 
 Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
 

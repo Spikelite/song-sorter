@@ -762,13 +762,19 @@ def fix_unknown(store: TrackStore) -> None:
 
 def _tracks_to_review(store: TrackStore, review_state: ReviewState) -> list[Track]:
     """ Part of manual track review - build a list of unreviewed tracks.
-        Focuses on artists with few total tracks (which are often miscategorized) 
+        Focuses on artists with few total tracks (which are often miscategorized)
     """
     index = ArtistIndex.from_store(store)
+    # Bypass: artist groups named in config "always_review" enter the queue
+    # regardless of size. Garbage buckets (a wrong value shared by many
+    # tracks) grow past the thin-artist threshold and would otherwise become
+    # permanently invisible to Review. Config entries are matched cleaned, so
+    # natural spellings work:  "always_review": ["Some Artist", ...]
+    always = {clean_artist(a) for a in _load_config().get("always_review", [])}
     tracks: list[Track] = []
     for letter, top_node in index.get_root().list_nodes().items():
         for artist, artist_node in top_node.list_nodes().items():
-            if artist_node.count() > 5:
+            if artist_node.count() > 5 and artist not in always:
                 continue
             for song, song_node in artist_node.list_nodes().items():
                 tracks.extend(song_node.list_tracks())
@@ -1764,10 +1770,10 @@ sync();render();
 </html>"""
 
 
-# Karaoke-brand noise: "[SC Karaoke]"-style bracket tags (stripped from the
-# store by Clean, and from songbook display strings) and known technical
-# parentheticals (songbook display only). Deliberately narrow so real
-# parentheticals like "(I've Had) The Time of My Life" survive.
+# Karaoke-brand noise: "[SC Karaoke]"-style bracket tags and known technical
+# parentheticals -- stripped from the store by Clean and from songbook display
+# strings. Deliberately narrow so real parentheticals like "(I've Had) The
+# Time of My Life" survive.
 _KARAOKE_BRACKET_RE = re.compile(r"\s*\[[^\]]*karaoke[^\]]*\]", re.IGNORECASE)
 _BOOK_PAREN_RE = re.compile(
     r"\s*\((?:wo?bgv|w/?bgv|no bgv|bgv|wvocals?|vr|multiplex|mplx|"
@@ -1979,16 +1985,38 @@ def clean(store: TrackStore) -> None:
                 debranded += 1
     questionary.print(f"Stripped {debranded} [.. Karaoke ..] brand tags")
 
-    # Karaoke track numbers parsed as the artist: filenames like
-    # "EZH-31 - 04 - Milkshake" leave artist="04". A bare 1-2 digit value is a
-    # disc track position, never a real artist. We deliberately do NOT touch
-    # 3+ digit names (911, 411, 112 are real bands), letters-with-digits
-    # (Blink-182, Maroon-5), or song titles (hundreds legitimately start with a
-    # number). Cleared artists become "Unknown" for later recovery via Fix-unknown.
+    # Case-insensitive backstop for the paren-noise the literal lists above
+    # miss: the song list lacked "(Wbgv)"/"(Bgv)"/"(Mplx)" outright, and
+    # literal matching can never cover case variants like "(WOBGV)".
+    denoised = 0
+    for t in store.all():
+        for field in ("artist", "song"):
+            val = getattr(t, field)
+            m = _BOOK_PAREN_RE.search(val)
+            if m:
+                t.metadata["style"] = m.group().strip()
+                setattr(t, field, re.sub(r"\s{2,}", " ", _BOOK_PAREN_RE.sub("", val)).strip())
+                denoised += 1
+    questionary.print(f"Stripped {denoised} karaoke parentheticals (case-insensitive)")
+
+    # Bogus artists become "Unknown" so the Unknown pipeline (Tag-fill,
+    # Fix-unknown) can reach them:
+    #   - bare 1-2 digit values: disc track positions from filenames like
+    #     "EZH-31 - 04 - Milkshake" (3+ digits untouched: 911/411/112 are real
+    #     bands, as are letters-with-digits like Blink-182)
+    #   - catalog-path fragments ("SC\SC-199\SC-199-02")
+    #   - empty strings: their shared "" group exceeds the thin-artist
+    #     threshold, making them permanently invisible to Review otherwise
     cleared = 0
     for t in store.all():
         artist = t.artist.strip()
-        if re.fullmatch(r"\d{1,2}", artist):
+        if artist.lower() == "unknown":
+            continue
+        is_track_no = bool(re.fullmatch(r"\d{1,2}", artist))
+        is_catalog_path = "\\" in artist
+        if not (is_track_no or is_catalog_path or not artist):
+            continue
+        if is_track_no:
             # Preserve what we prune: the disc track number, and the catalog id
             # (parts[0] of the original filename, dropped at parse time). Both
             # are useful later (e.g. catalog-number -> real-artist lookup).
@@ -1996,9 +2024,11 @@ def clean(store: TrackStore) -> None:
             stem_parts = Path(t.path).stem.split(" - ")
             if len(stem_parts) >= 3:
                 t.metadata["catalog_id"] = stem_parts[0].strip()
-            t.artist = "Unknown"
-            cleared += 1
-    questionary.print(f"Cleared {cleared} track-number artists")
+        elif is_catalog_path:
+            t.metadata.setdefault("catalog_id", artist)
+        t.artist = "Unknown"
+        cleared += 1
+    questionary.print(f"Cleared {cleared} track-number/catalog-path/empty artists")
 
 
 # Karaoke descriptor suffixes that appear inside ID3 artist tags, e.g.
