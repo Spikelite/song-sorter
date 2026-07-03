@@ -1764,10 +1764,11 @@ sync();render();
 </html>"""
 
 
-# Karaoke-brand noise stripped from songbook *display* strings: "[SC Karaoke]"
-# style brackets and known technical parentheticals. Deliberately narrow so real
+# Karaoke-brand noise: "[SC Karaoke]"-style bracket tags (stripped from the
+# store by Clean, and from songbook display strings) and known technical
+# parentheticals (songbook display only). Deliberately narrow so real
 # parentheticals like "(I've Had) The Time of My Life" survive.
-_BOOK_BRACKET_RE = re.compile(r"\s*\[[^\]]*karaoke[^\]]*\]", re.IGNORECASE)
+_KARAOKE_BRACKET_RE = re.compile(r"\s*\[[^\]]*karaoke[^\]]*\]", re.IGNORECASE)
 _BOOK_PAREN_RE = re.compile(
     r"\s*\((?:wo?bgv|w/?bgv|no bgv|bgv|wvocals?|vr|multiplex|mplx|"
     r"no backing vocals?|instr\.?|instrumental(?: version)?)\)",
@@ -1776,7 +1777,7 @@ _BOOK_PAREN_RE = re.compile(
 
 
 def _book_display(s: str) -> str:
-    s = _BOOK_BRACKET_RE.sub("", s or "")
+    s = _KARAOKE_BRACKET_RE.sub("", s or "")
     s = _BOOK_PAREN_RE.sub("", s)
     return re.sub(r"\s{2,}", " ", s).strip()
 
@@ -1961,6 +1962,22 @@ def clean(store: TrackStore) -> None:
                 t.song = t.song.replace(ind, "").strip()
 
     questionary.print(f"Modified {modify_count}")
+
+    # "[SC Karaoke]"-style brand tags: the bracket contents vary by disc
+    # series, so these are matched by pattern rather than the literal lists
+    # above. Left in place, they split one song into several "distinct" titles
+    # (with/without the tag), duplicating Final-final exports and inflating
+    # counts.
+    debranded = 0
+    for t in store.all():
+        for field in ("artist", "song"):
+            val = getattr(t, field)
+            m = _KARAOKE_BRACKET_RE.search(val)
+            if m:
+                t.metadata["style"] = m.group().strip()
+                setattr(t, field, re.sub(r"\s{2,}", " ", _KARAOKE_BRACKET_RE.sub("", val)).strip())
+                debranded += 1
+    questionary.print(f"Stripped {debranded} [.. Karaoke ..] brand tags")
 
     # Karaoke track numbers parsed as the artist: filenames like
     # "EZH-31 - 04 - Milkshake" leave artist="04". A bare 1-2 digit value is a

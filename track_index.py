@@ -75,6 +75,11 @@ def clean_artist(artist: str) -> str:
 
 def clean_song(song: str) -> str:
     song = song.lower()
+    # "[sc karaoke]"-style brand tags must not distinguish songs: left in, one
+    # title splits into several "distinct" songs, duplicating Final-final
+    # exports. Clean strips them from the data too; this keeps grouping right
+    # even for not-yet-cleaned batches.
+    song = re.sub(r"\[[^\]]*karaoke[^\]]*\]", " ", song)
     song = song.replace("-", "")
     song = song.replace(".", "")
     song = song.replace("&", "and")
@@ -93,6 +98,7 @@ def clean_song(song: str) -> str:
     # remove any parenthetical blocks
     song = re.sub(r'\s*\([^)]*\)\s*', ' ', song)
 
+    song = re.sub(r"\s{2,}", " ", song)  # runs of spaces must not split groups
     song = song.strip()
     return song
 
