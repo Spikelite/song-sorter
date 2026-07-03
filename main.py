@@ -1615,6 +1615,7 @@ def tracks_to_keep(store: TrackStore) -> None:
 
     # Collect the desired output: dest -> source, one best copy per artist+song.
     expected: dict[Path, Path] = {}
+    index_entries: list[dict] = []
     node_set = [ArtistIndex.from_store(store).get_root()]
     while node_set:
         n = node_set.pop()
@@ -1630,6 +1631,22 @@ def tracks_to_keep(store: TrackStore) -> None:
         for exn in best.file_types:
             src = Path(best.path).with_suffix(f".{exn}")  # per-type source (.mp3/.cdg/.zip)
             expected[output_root / prefix / artist / f"{stem}.{exn}"] = src
+        # Curated index entry for external players (e.g. KriticalDJ): cleaned
+        # artist/song strings + duration, pointing at the playable file, so
+        # players need not re-derive names from noisy filename stems.
+        media_ext = "zip" if "zip" in best.file_types else \
+            ("mp3" if "mp3" in best.file_types else None)
+        if media_ext:
+            try:
+                dur = int(float(best.metadata.get("length_seconds", "") or 0))
+            except ValueError:
+                dur = 0
+            index_entries.append({
+                "path": f"{prefix}/{artist}/{stem}.{media_ext}",
+                "artist": best.artist,
+                "title": best.song,
+                "duration": dur,
+            })
 
     # Copy anything missing or changed; skip files already present and identical.
     copied = skipped = missing = 0
@@ -1677,6 +1694,14 @@ def tracks_to_keep(store: TrackStore) -> None:
             questionary.print(f"Pruned {len(stale)} stale file(s).")
         elif stale:
             questionary.print(f"Left {len(stale)} stale file(s) in place.")
+
+    # Curated library index for external players (KriticalDJ reads this).
+    output_root.mkdir(parents=True, exist_ok=True)
+    index_path = output_root / "index.json"
+    index_path.write_text(
+        json.dumps({"version": 1, "songs": index_entries}, ensure_ascii=False),
+        encoding="utf-8")
+    questionary.print(f"Library index -> {index_path} ({len(index_entries):,} songs)")
 
     # Keep the digital songbook in the output tree current with this export.
     book, n = build_songbook(store, output_root / "songbook.html",

@@ -172,7 +172,9 @@ The interactive menu (`python main.py`) operates on a persistent track store
   is safe and incremental — files already present and unchanged are skipped —
   and it can optionally **prune** stale files left by earlier runs (e.g. after
   an artist was renamed), touching only its own `<prefix>/<artist>/<file>` layout.
-  Also refreshes a `songbook.html` in the output root (see **Songbook**).
+  Also refreshes a `songbook.html` in the output root (see **Songbook**) and
+  writes an `index.json` library index there (curated artist/title/duration
+  per playable file) for external players such as KriticalDJ.
 - **Songbook** — Generate the digital songbook: a **single self-contained HTML
   file** with every distinct artist+song embedded, searchable instantly in any
   browser — fully offline, zero install, just double-click it. Guest-friendly
