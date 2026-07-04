@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,12 +75,15 @@ class TrackStore:
         self._by_path = track_dict
 
     def save(self, path: str | Path) -> None:
-        """Write store to disk."""
+        """Write store to disk atomically (temp file + rename), so an
+        interrupted write can never corrupt or truncate the cache."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": self._VERSION,
             "tracks": [t.to_dict() for t in self.all()],
         }
-        with open(p, "w", encoding="utf-8") as f:
+        tmp = p.parent / (p.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        os.replace(tmp, p)
