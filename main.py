@@ -1621,6 +1621,19 @@ def _best_track(tracks: list[Track]) -> Track:
 
     return max(tracks, key=_mp3_size)
 
+
+def _ranked_tracks(tracks: list[Track]) -> list[Track]:
+    """The copies of one artist-song pair, best-first (largest MP3 wins), so
+    the export can keep the best N versions rather than only the single best."""
+    def _mp3_size(t: Track) -> int:
+        raw = t.metadata.get("mp3_size")
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    return sorted(tracks, key=_mp3_size, reverse=True)
+
 def tracks_to_keep(store: TrackStore) -> None:
     """Export one best copy per artist+song to an output tree, laid out as
     <output>/<first-letter>/<artist>/<name>.<ext> (unknown artists skipped).
@@ -1641,6 +1654,26 @@ def tracks_to_keep(store: TrackStore) -> None:
     _save_config(cfg)
     output_root = Path(out)
 
+    # How many copies of each song to export (1 = best only, as before). Extra
+    # copies become selectable "versions" in the index for players like
+    # KriticalDJ. Remembered between runs.
+    try:
+        default_vl = int(cfg.get("version_limit", 1))
+    except (TypeError, ValueError):
+        default_vl = 1
+    vl_raw = questionary.text(
+        "Max versions to export per song (1 = best only):",
+        default=str(default_vl),
+    ).ask()
+    if vl_raw is None:
+        return
+    try:
+        version_limit = max(1, int(vl_raw.strip()))
+    except ValueError:
+        version_limit = 1
+    cfg["version_limit"] = version_limit
+    _save_config(cfg)
+
     # Collect the desired output: dest -> source, one best copy per artist+song.
     expected: dict[Path, Path] = {}
     index_entries: list[dict] = []
@@ -1650,7 +1683,8 @@ def tracks_to_keep(store: TrackStore) -> None:
         if not n.is_leaf():
             node_set.extend(n.list_nodes().values())
             continue
-        best = _best_track(n.list_tracks())
+        ranked = _ranked_tracks(n.list_tracks())  # best-first
+        best = ranked[0]
         artist = clean_artist(best.artist)
         if artist in ("", "unknown"):
             continue
@@ -1659,22 +1693,48 @@ def tracks_to_keep(store: TrackStore) -> None:
         for exn in best.file_types:
             src = Path(best.path).with_suffix(f".{exn}")  # per-type source (.mp3/.cdg/.zip)
             expected[output_root / prefix / artist / f"{stem}.{exn}"] = src
+
+        def _playable_ext(t: Track):
+            return "zip" if "zip" in t.file_types else \
+                ("mp3" if "mp3" in t.file_types else None)
+
+        def _dur(t: Track) -> int:
+            try:
+                return int(float(t.metadata.get("length_seconds", "") or 0))
+            except ValueError:
+                return 0
+
         # Curated index entry for external players (e.g. KriticalDJ): cleaned
         # artist/song strings + duration, pointing at the playable file, so
         # players need not re-derive names from noisy filename stems.
-        media_ext = "zip" if "zip" in best.file_types else \
-            ("mp3" if "mp3" in best.file_types else None)
+        media_ext = _playable_ext(best)
         if media_ext:
-            try:
-                dur = int(float(best.metadata.get("length_seconds", "") or 0))
-            except ValueError:
-                dur = 0
-            index_entries.append({
+            entry = {
                 "path": f"{prefix}/{artist}/{stem}.{media_ext}",
                 "artist": best.artist,
                 "title": best.song,
-                "duration": dur,
-            })
+                "duration": _dur(best),
+            }
+            # Extra copies (up to version_limit total) are exported alongside
+            # and listed as selectable versions. Label = the source's folder
+            # (usually the karaoke brand/disc) so the KJ can tell them apart.
+            versions = []
+            for alt in ranked[1:version_limit]:
+                astem = Path(alt.path).stem
+                aext = _playable_ext(alt)
+                if aext is None or astem == stem:  # unplayable or name-collision
+                    continue
+                for exn in alt.file_types:
+                    expected[output_root / prefix / artist / f"{astem}.{exn}"] = \
+                        Path(alt.path).with_suffix(f".{exn}")
+                versions.append({
+                    "path": f"{prefix}/{artist}/{astem}.{aext}",
+                    "label": Path(alt.path).parent.name or "Alternate",
+                    "duration": _dur(alt),
+                })
+            if versions:
+                entry["versions"] = versions
+            index_entries.append(entry)
 
     # Copy anything missing or changed; skip files already present and identical.
     copied = skipped = missing = 0
