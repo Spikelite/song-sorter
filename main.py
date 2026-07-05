@@ -55,6 +55,14 @@ def _save_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+# Compact catalog stems with no spaces around the dashes, e.g.
+# 'DIS61201-13-MARY POPPINS-I LOVE TO LAUGH' or 'SGB24-09-ARTIST-SONG':
+# a CATALOG (letters+digits) then a track number, then artist-song. Without
+# this they fall through to "whole stem as song", leaking the catalog id into
+# the displayed title (e.g. the Disney 'DIS#####' batch).
+_COMPACT_CATALOG_RE = re.compile(r"^[A-Za-z]{2,6}\d{1,6}-\d{1,3}-(.+)$")
+
+
 def _parse_artist_song(stem: str) -> tuple[str, str]:
     """Parse 'Artist - Song' or 'Song' from filename stem."""
     if " - " in stem:
@@ -65,6 +73,15 @@ def _parse_artist_song(stem: str) -> tuple[str, str]:
         if len(parts) == 2:
             # (source) - song
             return "", parts[1].strip()
+    m = _COMPACT_CATALOG_RE.match(stem)
+    if m:
+        rest = m.group(1).strip()
+        if "-" in rest:
+            # first dash splits artist from song; the song itself may keep
+            # later dashes ('ZIP-A-DEE-DOO-DAH')
+            artist, song = rest.split("-", 1)
+            return artist.strip(), song.strip()
+        return "", rest  # catalog+track prefix stripped, no artist present
     return "", stem.strip() or "Unknown"
 
 
@@ -259,7 +276,18 @@ def refresh_names(store: TrackStore, root: Path) -> None:
         if len(parts) != 2:
             # only making changes to {??} - {song} tracks
             if len(parts) != 3:
-                # But length != 2 or 3 is extra strange
+                # Compact catalog stems (no ' - ') the initial scan stored as
+                # 'Unknown - <whole stem>': recover them via the shared parser.
+                # Only overwrite tracks still marked Unknown so curated names
+                # are never clobbered.
+                ca, cs = _parse_artist_song(p.stem)
+                if ca and cs:
+                    track = store.get(str(p.resolve()))
+                    if track is not None and track.artist.lower() in ("unknown", ""):
+                        track.artist = ca
+                        track.song = cs
+                        added += 1
+                        continue
                 print(f"Skip unexpected: {stem}")
             continue
 
