@@ -107,6 +107,36 @@ def safe_folder(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "-", name).strip() or "_"
 
 
+def _echo_tokens(s: str) -> frozenset:
+    """Order-insensitive word set, so 'Isaak, Chris' matches 'Chris Isaak'."""
+    s = re.sub(r"[^a-z0-9 ]", " ", (s or "").lower())
+    return frozenset(w for w in s.split() if w)
+
+
+def strip_artist_echo(artist: str, song: str) -> str | None:
+    """Remove an artist echo from a song title, or None if there is none.
+
+    Source filenames like 'Isaak, Chris-Wicked Game' sometimes survive into
+    the song field, so the display chain reads 'Chris Isaak - Isaak,
+    Chris-Wicked Game' (issue #2). A dash-separated leading or trailing
+    segment is stripped ONLY when its word set equals the artist's exactly
+    (order-insensitive, so comma forms match) -- titles that merely contain
+    the artist's name ("My Home's In Alabama") never lose words."""
+    at = _echo_tokens(artist)
+    if not at or not song:
+        return None
+    dashes = [m.start() for m in re.finditer("-", song)]
+    for i in dashes:  # leading echo: grow the left side dash by dash
+        left, right = song[:i].strip(), song[i + 1:].strip()
+        if left and right and _echo_tokens(left) == at:
+            return right
+    for i in reversed(dashes):  # trailing echo: grow the right side
+        left, right = song[:i].strip(), song[i + 1:].strip()
+        if left and right and _echo_tokens(right) == at:
+            return left
+    return None
+
+
 _NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
 
 

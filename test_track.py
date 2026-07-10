@@ -171,3 +171,36 @@ def test_safe_folder_flattens_path_hostile_characters() -> None:
     assert safe_folder('a:b*c?d"e<f>g|h') == "a-b-c-d-e-f-g-h"
     assert safe_folder("plain name") == "plain name"
     assert safe_folder("///") == "---"
+
+
+# ---------------------------------------------------------------------------
+# strip_artist_echo: 'Artist - Artist-Title' display chains (issue #2)
+
+def test_echo_strips_leading_artist() -> None:
+    from track_index import strip_artist_echo
+    assert strip_artist_echo("Madonna", "Madonna-Vogue") == "Vogue"
+    assert strip_artist_echo("Dire Straits", "Dire Straits-Sultans Of Swing") \
+        == "Sultans Of Swing"
+    # comma-form echoes match order-insensitively
+    assert strip_artist_echo("Chris Isaak", "Isaak, Chris-Wicked Game") == "Wicked Game"
+    assert strip_artist_echo("Bob Marley", "Marley, Bob-Jammin'") == "Jammin'"
+    # artist containing a dash: the split point walks past it
+    assert strip_artist_echo("A-Ha", "A-Ha-Take On Me") == "Take On Me"
+
+
+def test_echo_strips_trailing_artist() -> None:
+    from track_index import strip_artist_echo
+    assert strip_artist_echo("Tom Jones", "Delilah - Tom Jones") == "Delilah"
+    assert strip_artist_echo("Tom Jones", "Delilah - Jones, Tom") == "Delilah"
+
+
+def test_echo_never_bites_titles_that_mention_the_artist() -> None:
+    from track_index import strip_artist_echo
+    assert strip_artist_echo("Alabama", "My Home's In Alabama") is None
+    assert strip_artist_echo("Big & Rich", "Rollin' (The Ballad Of Big & Rich)") is None
+    assert strip_artist_echo("Raven", "That's So Raven") is None
+    assert strip_artist_echo("McClymonts", "The McClymonts") is None  # self-titled
+    assert strip_artist_echo("Blondie", "Heart Of Glass") is None
+    # a dash segment that merely CONTAINS the artist's words plus more
+    assert strip_artist_echo("Kiss", "Kiss Me Quick - Live") is None
+    assert strip_artist_echo("", "Anything - At All") is None

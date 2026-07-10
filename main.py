@@ -25,7 +25,7 @@ from tqdm import tqdm
 from track import Track, TrackStore
 from track_index import (ArtistIndex, SongIndex, TrackIndex, IndexNode,
                          clean_artist, clean_song, majority_raw, safe_folder,
-                         uncomma_artist)
+                         strip_artist_echo, uncomma_artist)
 from track_inspect import track_details
 from review_state import ReviewState
 
@@ -2137,6 +2137,21 @@ def clean(store: TrackStore) -> None:
         t.artist = "Unknown"
         cleared += 1
     questionary.print(f"Cleared {cleared} track-number/catalog-path/empty artists")
+
+    # Artist echoes in song titles (issue #2): a filename like
+    # 'Isaak, Chris-Wicked Game' surviving into the song field makes the
+    # display chain read 'Chris Isaak - Isaak, Chris-Wicked Game'. Strip a
+    # dash-separated leading/trailing segment only when its words are exactly
+    # the artist's (order-insensitive, so comma forms match too).
+    echoed = 0
+    for t in store.all():
+        if t.artist.lower() in ("unknown", ""):
+            continue
+        fixed = strip_artist_echo(t.artist, t.song)
+        if fixed:
+            t.song = fixed
+            echoed += 1
+    questionary.print(f"Stripped {echoed} artist echoes from song titles")
 
 
 # Karaoke descriptor suffixes that appear inside ID3 artist tags, e.g.
