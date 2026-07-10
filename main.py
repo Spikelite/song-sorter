@@ -24,7 +24,8 @@ from tqdm import tqdm
 
 from track import Track, TrackStore
 from track_index import (ArtistIndex, SongIndex, TrackIndex, IndexNode,
-                         clean_artist, clean_song, majority_raw, safe_folder,
+                         clean_artist, clean_song, fragments_match_title,
+                         majority_raw, rejoin_artist, safe_folder, split_stem,
                          strip_artist_echo, uncomma_artist)
 from track_inspect import track_details
 from review_state import ReviewState
@@ -1236,6 +1237,164 @@ def _norm_eq(a: str, b: str) -> bool:
     return norm(a) == norm(b)
 
 
+def _reliable_words(fragments: list[str]) -> list[str]:
+    """Query words from elided title fragments that are certainly complete.
+
+    The disc filenames cut characters at the dashes, so a fragment's edge
+    words may be partial ('Tur - E Loose' == 'Tur[n M]e Loose'): the first
+    fragment's leading word is complete only when the fragment has more
+    words, interior words are always complete, and the fragment after a cut
+    may start mid-word. Returns up to three longest words (>= 3 chars)."""
+    words: list[str] = []
+    for i, frag in enumerate(fragments):
+        w = frag.split()
+        if i == 0:
+            words += ([w[0]] + w[1:-1]) if len(w) > 1 else []
+        elif i == len(fragments) - 1:
+            words += w[1:] if len(w) > 1 else []
+        else:
+            words += w[1:-1]
+    words = [re.sub(r"[^A-Za-z0-9']", "", x) for x in words]
+    words = sorted({x for x in words if len(x) >= 3}, key=len, reverse=True)
+    return words[:3]
+
+
+def _mb_search_restitch(artist: str, words: list[str]) -> list:
+    """Recording search by artist + known-complete title words (AND'd), for
+    titles whose full phrase can't be queried because parts were elided."""
+    qa = _mb_escape(_mb_norm(artist, uncomma=True))
+    qw = " AND ".join(_mb_escape(w) for w in words)
+    q = f'artist:"{qa}" AND recording:({qw})'
+    url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "25"})
+    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.load(resp).get("recordings", [])
+
+
+def restitch_titles(store: TrackStore) -> None:
+    """(online) Repair titles from dash-elided disc filenames.
+
+    Some discs (FLY/SFKK style) write stems like
+    'FLY-03-06 - Belinda - Carlisle - Heaven Is A Pla - On Earth': the artist
+    is dash-split and the title has characters cut out at each dash. The
+    parser took artist 'Belinda', song 'Carlisle', and dropped the rest.
+
+    For unreviewed tracks whose stem has 3+ segments: reassemble the artist
+    against the known-artist set, then ask MusicBrainz for recordings by that
+    artist containing the fragments' complete words. A candidate title is
+    accepted only when every fragment fits IN ORDER from the title's start
+    (fragments_match_title) and the artist strongly matches. A single
+    unambiguous hit is applied and marked ok; ambiguous or thin evidence is
+    recorded as an mb_suggest for one-click acceptance in Review. Resumable
+    (metadata['restitch']) and offline-safe."""
+    if not _is_online():
+        questionary.print("Restitch needs internet -- skipped (offline).")
+        return
+
+    review_state = ReviewState()
+    review_state.load(_REVIEW_STATE_PATH)
+    known = set(ArtistIndex.from_store(store).count_artists())
+
+    recheck = bool(questionary.confirm(
+        "Re-check tracks previously restitched with no/weak result?",
+        default=False,
+    ).ask())
+
+    todo = []
+    for t in store.all():
+        if review_state.get(t.path) == "ok":
+            continue
+        if t.metadata.get("restitch") and not recheck:
+            continue
+        parts = split_stem(Path(t.path).stem)
+        if len(parts) < 3:
+            continue
+        joined = rejoin_artist(parts, known)
+        if joined:
+            artist, fragments = joined
+        elif clean_artist(t.artist) in known:
+            k = next((k for k in range(1, len(parts))
+                      if clean_artist(" ".join(parts[:k])) == clean_artist(t.artist)), None)
+            if k is None:
+                continue
+            artist, fragments = t.artist, parts[k:]
+        else:
+            continue
+        fragments = [f for f in fragments if f]
+        if fragments:
+            todo.append((t, artist, fragments))
+
+    if not todo:
+        questionary.print("No dash-elided stems to restitch.")
+        return
+    questionary.print(f"{len(todo)} candidate track(s).")
+
+    applied = suggested = none = 0
+    consecutive_fail = 0
+    last_save = time.monotonic()
+    try:
+        for t, artist, fragments in tqdm(todo, desc="Restitch", unit="track"):
+            words = _reliable_words(fragments)
+            if not words:
+                t.metadata["restitch"] = "none"
+                none += 1
+                continue
+            try:
+                res = _mb_search_restitch(artist, words)
+                time.sleep(1.1)
+                consecutive_fail = 0
+            except Exception:
+                consecutive_fail += 1
+                if consecutive_fail >= 5:
+                    tqdm.write("Lost connection to MusicBrainz -- saving and stopping.")
+                    break
+                continue
+
+            matches = []
+            for r in res:
+                mb_artist = _mb_credit_name(r.get("artist-credit"))
+                mb_title = r.get("title", "")
+                if (_mb_sim(artist, mb_artist) >= _MB_STRONG
+                        and fragments_match_title(fragments, mb_title)):
+                    matches.append((mb_artist, mb_title))
+            distinct = {_norm_eq_key(mt) for _, mt in matches}
+            frag_len = sum(len(re.sub(r"[^a-z0-9]", "", f.lower())) for f in fragments)
+            if len(distinct) == 1 and frag_len >= 10:
+                mb_artist, mb_title = matches[0]
+                tqdm.write(f"fix   {t.artist!r} - {t.song!r}  ->  {mb_artist!r} - {mb_title!r}")
+                t.artist, t.song = mb_artist, mb_title
+                t.metadata["restitch"] = "ok"
+                store.add(t)
+                review_state.set(t.path, "ok")
+                applied += 1
+            elif matches:
+                mb_artist, mb_title = matches[0]
+                t.metadata["restitch"] = "suggest"
+                t.metadata["mb_match"] = "suggest"
+                t.metadata["mb_artist"] = mb_artist
+                t.metadata["mb_title"] = mb_title
+                suggested += 1
+            else:
+                t.metadata["restitch"] = "none"
+                none += 1
+
+            if time.monotonic() - last_save >= 60:
+                store.save(_CACHE_PATH)
+                review_state.save(_REVIEW_STATE_PATH)
+                last_save = time.monotonic()
+    finally:
+        store.save(_CACHE_PATH)
+        review_state.save(_REVIEW_STATE_PATH)
+
+    questionary.print(
+        f"Restitch: applied {applied}, suggested {suggested} (accept in Review), "
+        f"no-match {none}")
+
+
+def _norm_eq_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
 def review_mode(store: TrackStore) -> None:
     """Sequential review of tracks from artists with 5 or fewer tracks.
 
@@ -2434,6 +2593,7 @@ def run_interactive(store: TrackStore) -> None:
         "tag-review",
         "tag-swap",
         "musicbrainz",
+        "restitch",
         "apply-resolutions",
         "unify-artists",
         "fixup",
@@ -2450,7 +2610,7 @@ def run_interactive(store: TrackStore) -> None:
         "fuzz_song",
         "exit",
     ]
-    online = {"musicbrainz"}  # options that need internet, flagged in the menu
+    online = {"musicbrainz", "restitch"}  # need internet, flagged in the menu
 
     # Menu layout: workflow-ordered sections for the main screen; the granular
     # one-off cleaners live in an Advanced submenu (All-clean chains them). The
@@ -2458,7 +2618,8 @@ def run_interactive(store: TrackStore) -> None:
     sections = [
         ("Build library", ["search", "detail", "refresh"]),
         ("Clean & identify  (run in order)",
-         ["all-clean", "tag-swap", "tag-review", "musicbrainz", "apply-resolutions"]),
+         ["all-clean", "tag-swap", "tag-review", "musicbrainz", "restitch",
+          "apply-resolutions"]),
         ("Review & fix", ["review", "fixup", "fix-artist", "fix-unknown"]),
         ("Organize", ["unify-artists"]),
         ("Inspect", ["browse", "artist", "song", "list", "stats"]),
@@ -2534,6 +2695,8 @@ def run_interactive(store: TrackStore) -> None:
             swap_from_tags(store)
         elif result == "musicbrainz":
             musicbrainz_lookup(store)
+        elif result == "restitch":
+            restitch_titles(store)
         elif result == "apply-resolutions":
             apply_resolutions(store)
         elif result == "unify-artists":
