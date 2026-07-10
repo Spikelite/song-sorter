@@ -139,13 +139,73 @@ def strip_artist_echo(artist: str, song: str) -> str | None:
 
 # Catalog-id stems like 'FLY-03-06' / 'SFKK-21-00' heading a filename.
 _STEM_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}-?\d[\w-]*$")
+# Stricter shape for a catalog id ANYWHERE in a stem: letter prefix then
+# digits/dashes ONLY ('SF 193-16', 'SFKK-21-00', 'EZH-31'), never trailing
+# words. Titles like 'Old 67' (no dash, few digits) must not qualify.
+_CATALOG_SEG_RE = re.compile(r"^[A-Za-z]{1,6}[- ]?\d[\d\- ]*$")
+
+
+def is_catalog_segment(seg: str) -> bool:
+    """True when a stem segment is a disc-catalog id like 'SF 193-16'.
+
+    Deliberately strict because titles can look catalog-ish: requires the
+    letters+digits shape AND (a dash or 5+ digits) AND length >= 4 -- so
+    'Old 67', 'U2', and 'Happy 70th Birthday' never qualify."""
+    t = (seg or "").strip()
+    if len(t.replace(" ", "")) < 4 or not _CATALOG_SEG_RE.fullmatch(t):
+        return False
+    return "-" in t or sum(ch.isdigit() for ch in t) >= 5
+
+
+# Compact catalog stems with no spaces around the dashes, e.g.
+# 'DIS61201-13-MARY POPPINS-I LOVE TO LAUGH' (see parse_artist_song).
+_COMPACT_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}\d{1,6}-\d{1,3}-(.+)$")
+
+
+def parse_artist_song(stem: str) -> tuple[str, str]:
+    """Best-effort (artist, song) from a filename stem.
+
+    Handles the naming orders seen across disc series:
+      - '(source) - Artist - Song'   (catalog first -- the common case)
+      - 'Artist - Song - SF 193-16'  (catalog LAST: Sunfly Main Series zips;
+        the old parser read these as artist='Song', song='SF 193-16' and
+        dropped the real artist entirely)
+      - 'CATALOG-TRACK-ARTIST-SONG'  (compact, no spaced dashes)
+    Returns ('', title) when no artist can be inferred."""
+    if " - " in stem:
+        parts = [p.strip() for p in stem.split(" - ") if p.strip()]
+        if (len(parts) >= 2 and not is_catalog_segment(parts[0])
+                and is_catalog_segment(parts[-1])):
+            parts = parts[:-1]  # catalog-last: 'Artist - Song - SF 193-16'
+            if len(parts) == 1:
+                return "", parts[0]
+            return parts[0], " - ".join(parts[1:])
+        if len(parts) > 2:
+            # (source) - artist - song
+            return parts[1], parts[2]
+        if len(parts) == 2:
+            # (source) - song
+            return "", parts[1]
+    m = _COMPACT_CATALOG_RE.match(stem)
+    if m:
+        rest = m.group(1).strip()
+        if "-" in rest:
+            # first dash splits artist from song; the song itself may keep
+            # later dashes ('ZIP-A-DEE-DOO-DAH')
+            artist, song = rest.split("-", 1)
+            return artist.strip(), song.strip()
+        return "", rest  # catalog+track prefix stripped, no artist present
+    return "", stem.strip() or "Unknown"
 
 
 def split_stem(stem: str) -> list[str]:
-    """Filename stem -> ' - '-separated segments, catalog id dropped."""
+    """Filename stem -> ' - '-separated segments, catalog ids dropped
+    (leading or trailing -- disc series differ on where they put them)."""
     parts = [p.strip() for p in stem.split(" - ") if p.strip()]
     if parts and _STEM_CATALOG_RE.fullmatch(parts[0].replace(" ", "")):
         parts = parts[1:]
+    if parts and is_catalog_segment(parts[-1]):
+        parts = parts[:-1]
     return parts
 
 

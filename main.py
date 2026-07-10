@@ -25,7 +25,8 @@ from tqdm import tqdm
 from track import Track, TrackStore
 from track_index import (ArtistIndex, SongIndex, TrackIndex, IndexNode,
                          clean_artist, clean_song, fragments_match_title,
-                         majority_raw, rejoin_artist, safe_folder, split_stem,
+                         is_catalog_segment, majority_raw, parse_artist_song,
+                         rejoin_artist, safe_folder, split_stem,
                          strip_artist_echo, uncomma_artist)
 from track_inspect import track_details
 from review_state import ReviewState
@@ -68,36 +69,6 @@ def _load_aliases() -> dict:
     except (ValueError, OSError):
         return {}
     return {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
-
-
-# Compact catalog stems with no spaces around the dashes, e.g.
-# 'DIS61201-13-MARY POPPINS-I LOVE TO LAUGH' or 'SGB24-09-ARTIST-SONG':
-# a CATALOG (letters+digits) then a track number, then artist-song. Without
-# this they fall through to "whole stem as song", leaking the catalog id into
-# the displayed title (e.g. the Disney 'DIS#####' batch).
-_COMPACT_CATALOG_RE = re.compile(r"^[A-Za-z]{2,6}\d{1,6}-\d{1,3}-(.+)$")
-
-
-def _parse_artist_song(stem: str) -> tuple[str, str]:
-    """Parse 'Artist - Song' or 'Song' from filename stem."""
-    if " - " in stem:
-        parts = stem.split(" - ")
-        if len(parts) > 2:
-            # (source) - artist - song
-            return parts[1].strip(), parts[2].strip()
-        if len(parts) == 2:
-            # (source) - song
-            return "", parts[1].strip()
-    m = _COMPACT_CATALOG_RE.match(stem)
-    if m:
-        rest = m.group(1).strip()
-        if "-" in rest:
-            # first dash splits artist from song; the song itself may keep
-            # later dashes ('ZIP-A-DEE-DOO-DAH')
-            artist, song = rest.split("-", 1)
-            return artist.strip(), song.strip()
-        return "", rest  # catalog+track prefix stripped, no artist present
-    return "", stem.strip() or "Unknown"
 
 
 def _default_scan_dir(store: TrackStore) -> str:
@@ -155,7 +126,7 @@ def add_tracks(store: TrackStore, root: Path) -> None:
             continue
 
         stem = p.stem
-        artist, song = _parse_artist_song(stem)
+        artist, song = parse_artist_song(stem)
         if "song-artist" in p.parts:
             # some parts of the path are reversed
             artist, song = song, artist
@@ -290,7 +261,7 @@ def refresh_names(store: TrackStore, root: Path) -> None:
                 # 'Unknown - <whole stem>': recover them via the shared parser.
                 # Only overwrite tracks still marked Unknown so curated names
                 # are never clobbered.
-                ca, cs = _parse_artist_song(p.stem)
+                ca, cs = parse_artist_song(p.stem)
                 if ca and cs:
                     track = store.get(str(p.resolve()))
                     if track is not None and track.artist.lower() in ("unknown", ""):
@@ -2311,6 +2282,27 @@ def clean(store: TrackStore) -> None:
             t.song = fixed
             echoed += 1
     questionary.print(f"Stripped {echoed} artist echoes from song titles")
+
+    # Catalog ids parked in the song field: 'Artist - Song - SF 193-16' stems
+    # (catalog LAST -- Sunfly Main Series zips) used to parse as
+    # artist='Song', song='SF 193-16', dropping the real artist. Re-parse the
+    # stem with the catalog-order-aware parser and recover both fields.
+    recats = 0
+    for t in store.all():
+        if not is_catalog_segment(t.song):
+            continue
+        a2, s2 = parse_artist_song(Path(t.path).stem)
+        if s2 and not is_catalog_segment(s2):
+            t.metadata.setdefault("catalog_id", t.song.strip())
+            if a2:
+                t.artist = a2
+            elif _norm_eq(t.artist, s2):
+                # the artist slot was just holding the title; route the track
+                # into the Unknown pipeline instead of leaving artist == song
+                t.artist = "Unknown"
+            t.song = s2
+            recats += 1
+    questionary.print(f"Re-parsed {recats} catalog-id songs from their filenames")
 
 
 # Karaoke descriptor suffixes that appear inside ID3 artist tags, e.g.
