@@ -111,6 +111,16 @@ The interactive menu (`python main.py`) operates on a persistent track store
   tracks previously scored none/flag/suggest (e.g. after matching improvements).
   **Offline-safe** — skips cleanly without internet, rate-limited,
   cached/resumable, and never part of an offline batch.
+- **Restitch** *(online)* — Repair titles from **dash-elided disc filenames**
+  (FLY/SFKK style), where the artist is dash-split and the title has
+  characters cut out at each dash: `FLY-03-06 - Belinda - Carlisle - Heaven
+  Is A Pla - On Earth` parsed as artist `Belinda`, song `Carlisle`. The
+  artist is reassembled against the known-artist set, MusicBrainz is queried
+  by the fragments' complete words, and a candidate title is accepted only
+  when every fragment fits **in order from the title's start**. A single
+  unambiguous hit is applied and marked ok; anything ambiguous becomes an
+  mb-suggestion for one-click acceptance in **Review**. Offline-safe,
+  rate-limited, resumable (`restitch` metadata).
 - **Apply-resolutions** — Apply a curated `resolutions.json` (produced offline,
   e.g. with assistance) that maps track paths to a corrected `artist`/`song`.
   Prompts for a **dry run** first so the entire change set can be reviewed, then

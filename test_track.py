@@ -204,3 +204,44 @@ def test_echo_never_bites_titles_that_mention_the_artist() -> None:
     # a dash segment that merely CONTAINS the artist's words plus more
     assert strip_artist_echo("Kiss", "Kiss Me Quick - Live") is None
     assert strip_artist_echo("", "Anything - At All") is None
+
+
+# ---------------------------------------------------------------------------
+# Restitch helpers: dash-elided disc filenames (FLY/SFKK style)
+
+def test_split_stem_drops_catalog_id() -> None:
+    from track_index import split_stem
+    assert split_stem("FLY-03-06 - Belinda - Carlisle - Heaven Is A Pla - On Earth") \
+        == ["Belinda", "Carlisle", "Heaven Is A Pla", "On Earth"]
+    assert split_stem("SFKK-21-00 - AVRIL - Lavigne - Hot -") \
+        == ["AVRIL", "Lavigne", "Hot"]
+    assert split_stem("Plain Artist - Plain Song") == ["Plain Artist", "Plain Song"]
+
+
+def test_rejoin_artist_reassembles_split_names() -> None:
+    from track_index import rejoin_artist
+    known = {"belinda carlisle", "foo fighters"}
+    assert rejoin_artist(["Belinda", "Carlisle", "Heaven Is A Pla", "On Earth"], known) \
+        == ("Belinda Carlisle", ["Heaven Is A Pla", "On Earth"])
+    assert rejoin_artist(["FOO", "Fighters", "L", "Road To Ruin"], known) \
+        == ("FOO Fighters", ["L", "Road To Ruin"])
+    # a 1-segment match is the normal parse, not a rejoin
+    assert rejoin_artist(["Madonna", "Vogue", "Extended"], {"madonna"}) is None
+    assert rejoin_artist(["Nobody", "Known", "Here"], known) is None
+
+
+def test_fragments_match_title_elisions() -> None:
+    from track_index import fragments_match_title
+    assert fragments_match_title(["Heaven Is A Pla", "On Earth"],
+                                 "Heaven Is a Place on Earth")
+    assert fragments_match_title(["Bel", "E Again"], "Believe Again")
+    assert fragments_match_title(["Tur", "E Loose"], "Turn Me Loose")
+    assert fragments_match_title(["Hate", "T I Love You"], "Hate That I Love You")
+    # end-truncation: title may continue past the last fragment
+    assert fragments_match_title(["Hea", "Nes (Friendship Never E"],
+                                 "Headlines (Friendship Never Ends)")
+    # must anchor at the start and stay in order
+    assert not fragments_match_title(["On Earth", "Heaven"], "Heaven Is a Place on Earth")
+    assert not fragments_match_title(["Place"], "Heaven Is a Place on Earth")
+    assert not fragments_match_title(["Bel", "E Again"], "Born Again")
+    assert not fragments_match_title([], "Anything")

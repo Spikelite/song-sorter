@@ -137,6 +137,63 @@ def strip_artist_echo(artist: str, song: str) -> str | None:
     return None
 
 
+# Catalog-id stems like 'FLY-03-06' / 'SFKK-21-00' heading a filename.
+_STEM_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}-?\d[\w-]*$")
+
+
+def split_stem(stem: str) -> list[str]:
+    """Filename stem -> ' - '-separated segments, catalog id dropped."""
+    parts = [p.strip() for p in stem.split(" - ") if p.strip()]
+    if parts and _STEM_CATALOG_RE.fullmatch(parts[0].replace(" ", "")):
+        parts = parts[1:]
+    return parts
+
+
+def rejoin_artist(parts: list[str], known: set) -> tuple[str, list[str]] | None:
+    """Reassemble an artist whose name was dash-split across stem segments.
+
+    'FLY-03-06 - Belinda - Carlisle - Heaven Is A Pla - On Earth' parses as
+    artist 'Belinda', song 'Carlisle' -- but joining leading segments and
+    checking against the known-artist set recovers ('Belinda Carlisle',
+    ['Heaven Is A Pla', 'On Earth']). Longest join wins; None when no join of
+    2+ leading segments is a known artist (a 1-segment match is the normal
+    parse, not a rejoin)."""
+    for k in range(len(parts) - 1, 1, -1):
+        cand = " ".join(parts[:k])
+        if clean_artist(cand) in known:
+            return cand, parts[k:]
+    return None
+
+
+def _frag_norm(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", (s or "").lower())).strip()
+
+
+def fragments_match_title(fragments: list[str], title: str) -> bool:
+    """True when the stem fragments fit `title` as an elided rendering.
+
+    These disc filenames cut characters out mid-title and mark the cut with a
+    dash ('Bel - E Again' == 'Bel[iev]e Again'), and may also truncate the
+    end. So: the first fragment must be a PREFIX of the title and every later
+    fragment must appear IN ORDER after the previous one; the title may
+    continue past the last fragment. All comparisons are lowercase and
+    punctuation-insensitive."""
+    frags = [_frag_norm(f) for f in fragments]
+    frags = [f for f in frags if f]
+    t = _frag_norm(title)
+    if not frags or not t:
+        return False
+    if not t.startswith(frags[0]):
+        return False
+    pos = len(frags[0])
+    for f in frags[1:]:
+        i = t.find(f, pos)
+        if i < 0:
+            return False
+        pos = i + len(f)
+    return True
+
+
 _NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
 
 
