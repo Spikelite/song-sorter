@@ -148,3 +148,26 @@ def test_uncomma_refuses_malformed_forms() -> None:
     assert uncomma_artist("Jones,") is None             # empty side
     assert uncomma_artist(", Tom") is None
     assert uncomma_artist("Puppets, The") is None       # trailing-article's job
+
+
+# ---------------------------------------------------------------------------
+# majority_raw / safe_folder: display-name and export-path safety helpers
+
+def test_majority_raw_prefers_most_common_spelling() -> None:
+    from track_index import IndexNode, majority_raw
+    node = IndexNode()
+    for artist in ["Tom Jones", "Tom Jones", "tom jones", "TOM JONES", "Tom Jones"]:
+        node.add(["x"], Track(path=f"/p/{artist}-{id(object())}", file_types=["cdg"],
+                              artist=artist, song="Delilah"))
+    assert majority_raw(node, "artist") == "Tom Jones"
+    assert majority_raw(node, "song") == "Delilah"
+    assert majority_raw(IndexNode(), "artist") == ""
+
+
+def test_safe_folder_flattens_path_hostile_characters() -> None:
+    from track_index import safe_folder
+    assert safe_folder("ac/dc") == "ac-dc"
+    assert safe_folder("back\slash") == "back-slash"
+    assert safe_folder('a:b*c?d"e<f>g|h') == "a-b-c-d-e-f-g-h"
+    assert safe_folder("plain name") == "plain name"
+    assert safe_folder("///") == "---"

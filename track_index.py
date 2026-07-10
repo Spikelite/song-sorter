@@ -73,6 +73,40 @@ def clean_artist(artist: str) -> str:
     art = art.strip()
     return art
 
+def iter_tracks(node: IndexNode):
+    """Every track under a node, depth-first."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.is_leaf():
+            yield from n.list_tracks()
+        else:
+            stack.extend(n.list_nodes().values())
+
+
+def majority_raw(node: IndexNode, field: str) -> str:
+    """The most common RAW spelling of `field` among a node's tracks.
+
+    Merge/cleanup passes match on clean keys but must DISPLAY a real spelling:
+    writing the clean key back (lowercased, punctuation-stripped) is how the
+    library filled up with 'wind & fire earth'-style display names."""
+    counts: dict[str, int] = {}
+    for t in iter_tracks(node):
+        v = getattr(t, field, "")
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def safe_folder(name: str) -> str:
+    """Folder-safe artist name for the export tree: path separators and other
+    filename-hostile characters become '-', so 'ac/dc' cannot nest an extra
+    directory level (which the export pruner's depth==3 filter never sees)."""
+    return re.sub(r'[\\/:*?"<>|]', "-", name).strip() or "_"
+
+
 _NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
 
 
