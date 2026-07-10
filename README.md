@@ -144,7 +144,11 @@ The interactive menu (`python main.py`) operates on a persistent track store
   so the Unknown pipeline can reach them: bare track numbers (a 1–2 digit
   `artist` like `04`, from filenames such as `EZH-31 - 04 - Milkshake`),
   catalog-path fragments (`SC\SC-199\…`), and empty artists — preserving the
-  track number / catalog id in metadata.
+  track number / catalog id in metadata. Finally, strips **artist echoes**
+  from song titles (`Isaak, Chris-Wicked Game` → `Wicked Game`): a
+  dash-separated leading/trailing segment is removed only when its words are
+  exactly the artist's (order-insensitive, so comma forms match), so titles
+  that merely mention the artist keep every word.
 - **Tag-fill** — Fill `Unknown`/empty artists from the MP3's ID3 `tag_artist`,
   only for clean real-looking names (additive — never overwrites an existing
   artist). Ambiguous tags (bare numbers, catalog-style IDs) are kept and
