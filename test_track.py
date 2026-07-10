@@ -109,3 +109,42 @@ def test_store_load_invalid_version(tmp_path: Path) -> None:
     store = TrackStore()
     with pytest.raises(ValueError, match="Unsupported cache version 99"):
         store.load(cache)
+
+
+# ---------------------------------------------------------------------------
+# uncomma_artist: safe 'Last, First' -> 'First Last' swaps
+
+def test_uncomma_swaps_person_names() -> None:
+    from track_index import uncomma_artist
+    assert uncomma_artist("Jones, Tom") == "Tom Jones"
+    assert uncomma_artist("Newton-John, Olivia") == "Olivia Newton-John"
+    assert uncomma_artist("Van Dyke, Dick") == "Dick Van Dyke"
+    assert uncomma_artist("Eckstine, Billy") == "Billy Eckstine"
+
+
+def test_uncomma_relocates_generational_suffixes() -> None:
+    from track_index import uncomma_artist
+    assert uncomma_artist("Davis, Sammy Jr.") == "Sammy Davis Jr."
+    assert uncomma_artist("Connick, Harry Jr.") == "Harry Connick Jr."
+
+
+def test_uncomma_refuses_bands_and_multi_credits() -> None:
+    from track_index import uncomma_artist
+    # band names with commas must never blind-swap (the 'wind & fire earth'
+    # incident): & / and / ft / feat / with mark a non-person credit
+    assert uncomma_artist("Earth, Wind & Fire") is None
+    assert uncomma_artist("Blood, Sweat & Tears") is None
+    assert uncomma_artist("Crosby, Stills & Nash") is None
+    assert uncomma_artist("Butler, Carl & Pearl") is None
+    assert uncomma_artist("Andrews, Michael Ft. Gary Jules") is None
+    assert uncomma_artist("Timberlake, Justin Feat. T.I") is None
+    assert uncomma_artist("Brooks, Meredith with Queen Latifah") is None
+
+
+def test_uncomma_refuses_malformed_forms() -> None:
+    from track_index import uncomma_artist
+    assert uncomma_artist("Tom Jones") is None          # no comma
+    assert uncomma_artist("Peter, Paul, Mary") is None  # two commas
+    assert uncomma_artist("Jones,") is None             # empty side
+    assert uncomma_artist(", Tom") is None
+    assert uncomma_artist("Puppets, The") is None       # trailing-article's job

@@ -73,6 +73,40 @@ def clean_artist(artist: str) -> str:
     art = art.strip()
     return art
 
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
+def uncomma_artist(artist: str) -> str | None:
+    """'Last, First' -> 'First Last' for PERSON names; None when unsafe.
+
+    Learned the hard way (the 'wind & fire earth' incident): band names keep
+    their commas ('Earth, Wind & Fire'), multi-artist credits ('Andrews,
+    Michael Ft. Gary Jules') aren't one person, and generational suffixes
+    relocate ('Davis, Sammy Jr.' -> 'Sammy Davis Jr.'). Callers must treat
+    None as "leave it alone" -- never fall back to a blind swap."""
+    if artist.count(",") != 1:
+        return None
+    last, _, first = artist.partition(",")
+    last, first = last.strip(), first.strip()
+    if not last or not first:
+        return None
+    suffix = ""
+    head = first.split()
+    if len(head) > 1 and head[-1].rstrip(".").lower() in _NAME_SUFFIXES:
+        suffix = " " + head[-1]
+        first = " ".join(head[:-1])
+    joined = f" {last.lower()} {first.lower()} "
+    if "&" in joined or "+" in joined:
+        return None
+    for w in (" and ", " ft ", " ft. ", " feat ", " feat. ", " featuring ",
+              " with ", " the "):
+        if w in joined:
+            return None
+    if len(first.split()) > 3 or len(last.split()) > 3:
+        return None
+    return f"{first} {last}{suffix}"
+
+
 def clean_song(song: str) -> str:
     song = song.lower()
     # "[sc karaoke]"-style brand tags must not distinguish songs: left in, one
