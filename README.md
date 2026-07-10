@@ -46,7 +46,9 @@ The interactive menu (`python main.py`) operates on a persistent track store
 ### Building the library
 - **Search** — Walk a folder for `.zip` and `.cdg` files, parse an
   `artist`/`song` from each filename, and add them to the store. This is how
-  tracks first enter the library.
+  tracks first enter the library. Parsed artists are passed through the
+  alias map (`artist-aliases.json`), so curated renames — comma forms,
+  brand-mislabels, spelling variants — self-heal on import.
 - **Detail** — For tracked files under a folder, extract technical metadata:
   file sizes, an MP3 SHA-256 hash, a CDG CRC-32 fingerprint, MP3
   bitrate/length/sample-rate/channels, and ID3 tags (artist/title/album/
@@ -151,7 +153,11 @@ The interactive menu (`python main.py`) operates on a persistent track store
   name (and whose artist field isn't), and swap them — applied only where ≥3
   such tracks in the same folder agree.
 - **Uncomma** — Convert `"Last, First"` artist names to `"First Last"` when
-  the swapped form matches a known artist.
+  the swap is safe for a person's name (band names with commas like
+  `"Earth, Wind & Fire"` and multi-artist credits are left alone;
+  `"Davis, Sammy Jr."` relocates the suffix) **and** the swapped form is
+  corroborated by the alias map or an existing artist. Rewrites the raw
+  display name, preserving casing.
 - **Trailing-article** — Move a trailing article to the front in artist and
   song fields (`"Models, The"` → `"The Models"`, `"Whole New World, A"` →
   `"A Whole New World"`). Deterministic — only fires when a field *ends* in

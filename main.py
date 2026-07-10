@@ -23,7 +23,9 @@ import rapidfuzz
 from tqdm import tqdm
 
 from track import Track, TrackStore
-from track_index import ArtistIndex, SongIndex, TrackIndex, IndexNode, clean_artist, clean_song
+from track_index import (ArtistIndex, SongIndex, TrackIndex, IndexNode,
+                         clean_artist, clean_song, majority_raw, safe_folder,
+                         uncomma_artist)
 from track_inspect import track_details
 from review_state import ReviewState
 
@@ -55,6 +57,18 @@ def _save_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+def _load_aliases() -> dict:
+    """The artist alias map (variant -> canonical) from artist-aliases.json;
+    {} when the file is absent or unreadable. Shared by Unify, Uncomma, and
+    Search so a curated rename is enforced everywhere new names can enter."""
+    try:
+        with open(_ARTIST_ALIASES_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    return {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
+
+
 # Compact catalog stems with no spaces around the dashes, e.g.
 # 'DIS61201-13-MARY POPPINS-I LOVE TO LAUGH' or 'SGB24-09-ARTIST-SONG':
 # a CATALOG (letters+digits) then a track number, then artist-song. Without
@@ -83,14 +97,6 @@ def _parse_artist_song(stem: str) -> tuple[str, str]:
             return artist.strip(), song.strip()
         return "", rest  # catalog+track prefix stripped, no artist present
     return "", stem.strip() or "Unknown"
-
-
-def _uncomma_artist(artist: str) -> str:
-    if ',' in artist:
-        split = artist.split(",")
-        swapped = f"{split[1]} {split[0]}".strip()
-        return swapped
-    return None
 
 
 def _default_scan_dir(store: TrackStore) -> str:
@@ -133,6 +139,8 @@ def add_tracks(store: TrackStore, root: Path) -> None:
     re-parse names on existing tracks."""
     added = 0
     skipped = 0
+    aliases = _load_aliases()  # curated renames self-heal at the door: a new
+    #                            'Jones, Tom' rip lands as 'Tom Jones'
 
     files = [p for p in root.rglob("*") if p.is_file()]
     for p in tqdm(files, desc="Scanning", unit="file"):
@@ -150,6 +158,7 @@ def add_tracks(store: TrackStore, root: Path) -> None:
         if "song-artist" in p.parts:
             # some parts of the path are reversed
             artist, song = song, artist
+        artist = aliases.get(artist, artist)
 
         if suffix == ".zip":
             file_types = ["zip"]
@@ -297,13 +306,13 @@ def refresh_names(store: TrackStore, root: Path) -> None:
 
         p1_artist = clean_artist(part1)
         p1_prefix = p1_artist.split('&', 1)[0]
-        p1_prefix = _uncomma_artist(p1_prefix) or p1_prefix
+        p1_prefix = uncomma_artist(p1_prefix) or p1_prefix
 
         is_p1_artist = p1_artist in likely_artists or p1_prefix in likely_artists
 
         p2_artist = clean_artist(part2)
         p2_prefix = p2_artist.split('&', 1)[0]
-        p2_prefix = _uncomma_artist(p2_prefix) or p2_prefix
+        p2_prefix = uncomma_artist(p2_prefix) or p2_prefix
 
         is_p2_artist = p2_artist in likely_artists or p2_prefix in likely_artists
 
@@ -504,16 +513,8 @@ def _bulk_edit_artist(store: TrackStore, node: IndexNode) -> None:
                 t.artist = text
                 store.add(t)
     elif result == "uncomma":
-        feature = None
-        first_artist = clean_artist(first_artist)
-        if '&' in first_artist:
-            prefix = first_artist.split("&", 1)
-            feature = prefix[1]
-            prefix = prefix[0]
-        else:
-            prefix = first_artist
-
-        prefix = _uncomma_artist(prefix) or prefix
+        # raw-preserving: never write clean_artist output as a display name
+        prefix, feature = _auto_clean_artist(first_artist)
 
         for t in all_tracks:
             print(f"Changing {t.artist} to {prefix}")
@@ -713,7 +714,7 @@ def fix_unknown(store: TrackStore) -> None:
                 print(f"Complex [{len(split)}] {song}")
                 complex_split += 1
         elif '-' in song:
-            split = song.split('-')
+            split = [s.strip() for s in song.split('-')]
             if len(split) == 2:
                 clean_s1 = clean_artist(split[0])
                 if clean_s1 in artists:
@@ -757,7 +758,7 @@ def fix_unknown(store: TrackStore) -> None:
             else:
                 print(f"Complex space: {song}")
         elif ',' in song:
-            split = song.split(',')
+            split = [s.strip() for s in song.split(',')]
             if len(split) == 2:
                 clean_s0 = clean_artist(split[0])
                 if clean_s0 in artists:
@@ -772,18 +773,16 @@ def fix_unknown(store: TrackStore) -> None:
                 complex_split += 1
                 #print(f"Complex comma: {song}")
         else:
+            # Space-only stems: a leading/trailing word matching a known
+            # artist is too weak to auto-apply ('America The Beautiful' would
+            # become America - 'The Beautiful'). Report the candidates so a
+            # human can act; never write. This branch previously computed a
+            # fix, printed it, and silently discarded it.
             split = song.split(" ")
-            if clean_artist(split[0]) in artists:
-                artist = split[0]
-                song = " ".join(split[1:])
-                print(f"split 1 {song} -- {artist}")
-                
-            elif clean_artist(split[-1]) in artists:
-                artist = split[-1]
-                song = " ".join(split[:-1])
-                print(f"split neg-1 {song} -- {artist}")
-            # either just a song, or artist[ ]song 
-            # print(f"No Split [{song}]")
+            if len(split) > 1 and clean_artist(split[0]) in artists:
+                print(f"candidate: '{split[0]}' - '{' '.join(split[1:])}'  [{song}]")
+            elif len(split) > 1 and clean_artist(split[-1]) in artists:
+                print(f"candidate: '{split[-1]}' - '{' '.join(split[:-1])}'  [{song}]")
             no_split += 1
 
     questionary.print(f"Success {success}, simple {simple_split}, id {id_split}, Complex {complex_split}, Comma {comma_split}. No Split {no_split}")
@@ -811,15 +810,18 @@ def _tracks_to_review(store: TrackStore, review_state: ReviewState) -> list[Trac
     return tracks
 
 
-def _auto_clean_artist(artist: str) -> tuple[str, str]:
-    artist = clean_artist(artist)
-    if '&' in artist:
-        prefix, feature = artist.split('&', 1)
+def _auto_clean_artist(artist: str) -> tuple[str, str | None]:
+    """Split a credit into (primary artist, feature) and uncomma the primary,
+    PRESERVING raw casing -- the old version returned clean_artist output,
+    which put lowercased display names into the library."""
+    raw = re.sub(r"\s+(?:with|and|feat\.?|f\.|ft\.?|featuring)\s+", " & ",
+                 artist, flags=re.IGNORECASE)
+    if "&" in raw:
+        prefix, feature = raw.split("&", 1)
+        prefix, feature = prefix.strip(), feature.strip()
     else:
-        prefix, feature = artist, None
-
-    prefix = clean_artist(prefix)
-    prefix = _uncomma_artist(prefix) or prefix
+        prefix, feature = raw.strip(), None
+    prefix = uncomma_artist(prefix) or prefix
     return prefix, feature
 
 
@@ -894,7 +896,7 @@ def _song_as_known_artist(song: str, known: set) -> str | None:
     comma ('Earth, Wind & Fire') don't flip to a known artist and fall through
     to the direct match."""
     if song.count(",") == 1:
-        flipped = _uncomma_artist(song)
+        flipped = uncomma_artist(song)
         if flipped and clean_artist(flipped) in known:
             return flipped
     if clean_artist(song) in known:
@@ -1452,19 +1454,9 @@ def unify_artists(store: TrackStore) -> None:
     For every track whose exact artist string matches a key, rewrites it to the
     canonical form. Prompts for a dry run first so the full rename set can be
     reviewed. Only the artist field changes; review state is left untouched."""
-    p = Path(_ARTIST_ALIASES_PATH)
-    if not p.exists():
-        questionary.print(f"No alias file at {p}.")
-        return
-    try:
-        with open(p, encoding="utf-8") as f:
-            data = json.load(f)
-    except (ValueError, OSError) as exc:
-        questionary.print(f"Could not read aliases: {exc}")
-        return
-    aliases = {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
+    aliases = _load_aliases()
     if not aliases:
-        questionary.print("Alias file has no usable entries.")
+        questionary.print(f"No usable aliases at {_ARTIST_ALIASES_PATH}.")
         return
 
     dry = questionary.confirm(
@@ -1689,6 +1681,9 @@ def tracks_to_keep(store: TrackStore) -> None:
         if artist in ("", "unknown"):
             continue
         prefix = artist[0] if re.match("[a-z]", artist[:1]) else "#"
+        # folder-safe: an artist like 'ac/dc' must not nest an extra directory
+        # level (the pruner's depth==3 filter would never see those files)
+        artist = safe_folder(artist)
         stem = Path(best.path).stem
         for exn in best.file_types:
             src = Path(best.path).with_suffix(f".{exn}")  # per-type source (.mp3/.cdg/.zip)
@@ -2228,18 +2223,30 @@ def trailing_article(store: TrackStore) -> None:
 
 
 def standard_artist(store: TrackStore) -> None:
-    # swapping "artist, name" to "name artist"
+    """Uncomma: rewrite 'Last, First' artists to 'First Last'.
+
+    Only swaps when the safe person-name swap succeeds (uncomma_artist -- band
+    names like 'Earth, Wind & Fire' return None and are left alone) AND the
+    swapped form is corroborated: either the alias map names a canonical
+    target, or the swapped artist already exists in the store. Rewrites the
+    RAW artist string, preserving casing -- the old version wrote the
+    lowercased clean form back as the display name, which is exactly where
+    relics like 'wind & fire earth' came from."""
     index = ArtistIndex.from_store(store)
     artists = set(index.count_artists())
+    aliases = _load_aliases()
 
     swap_count = 0
     for t in store.all():
-        clean_name = clean_artist(t.artist)
-        if "," in clean_name:
-            swapped = _uncomma_artist(clean_name)
-            if swapped in artists:
-                t.artist = swapped
-                swap_count += 1
+        raw = t.artist
+        target = aliases.get(raw)
+        if target is None and "," in raw:
+            swapped = uncomma_artist(raw)
+            if swapped and clean_artist(swapped) in artists:
+                target = swapped
+        if target and target != raw:
+            t.artist = target
+            swap_count += 1
     questionary.print(f"Swapped {swap_count}")
 
 
@@ -2271,17 +2278,13 @@ def fuzz_artist(store: TrackStore) -> None:
 
                     # break ties consistently. hash?
                     if this_count < other_count or (this_count == other_count and hash(anode) < hash(letter_nodes[other_artist])):
-                        questionary.print(f"Fuzz match {ratio:.1f} for {artist}#{this_count} to {other_artist}#{other_count}")
-                        # now rename
-                        to_rename = [anode]
-                        while len(to_rename) > 0:
-                            node = to_rename.pop()
-                            if node.is_leaf():
-                                for t in node.list_tracks():
-                                    t.artist = other_artist
-                            else:
-                                for n in node.list_nodes().values():
-                                    to_rename.append(n)
+                        # display the winner's majority RAW spelling -- the
+                        # node key is the lowercased clean form and writing it
+                        # back is how lowercase display relics were born
+                        target = majority_raw(letter_nodes[other_artist], "artist") or other_artist
+                        questionary.print(f"Fuzz match {ratio:.1f} for {artist}#{this_count} to {target}#{other_count}")
+                        for t in _tracks(anode):
+                            t.artist = target
                         break
 
 
@@ -2303,26 +2306,21 @@ def fuzz_song(store: TrackStore) -> None:
                     if other_song == song:
                         continue
 
-                    ratio = rapidfuzz.fuzz.ratio(song, other_song)    
+                    ratio = rapidfuzz.fuzz.ratio(song, other_song)
                     if ratio >= 85.0:
                         this_count = snode.count()
                         other_count = song_nodes[other_song].count()
 
                         # break ties consistently. hash?
                         if this_count < other_count or (this_count == other_count and hash(snode) < hash(song_nodes[other_song])):
-                            questionary.print(f"Fuzz match {ratio:.1f} for {song}#{this_count} to {other_song}#{other_count}")
-                        
-                            # now rename
-                            to_rename = [snode]
-                            while len(to_rename) > 0:
-                                 node = to_rename.pop()
-                                 if node.is_leaf():
-                                     for t in node.list_tracks():
-                                         t.song = other_song
-                                         store.add(t)
-                                 else:
-                                     for n in node.list_nodes().values():
-                                         to_rename.append(n)
+                            # write the winner's majority RAW title, never the
+                            # clean key (lowercased, apostrophes stripped,
+                            # in'->ing rewritten -- a display-name destroyer)
+                            target = majority_raw(song_nodes[other_song], "song") or other_song
+                            questionary.print(f"Fuzz match {ratio:.1f} for {song}#{this_count} to {target}#{other_count}")
+                            for t in _tracks(snode):
+                                t.song = target
+                                store.add(t)
                             break
 
 
@@ -2384,16 +2382,22 @@ def ungroup_artist(store: TrackStore) -> None:
     maybe_groups = [t for t in single_tracks if '&' in t.artist]
     questionary.print(f"with {len(maybe_groups)} options")
 
+    # clean form -> most common raw spelling, so the rewrite below can display
+    # a real name instead of the lowercased clean key
+    raw_of: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for t in store.all():
+        raw_of[clean_artist(t.artist)][t.artist] += 1
+
     total_swaps = 0
     for t in maybe_groups:
-
-        prefix, feature = t.artist.split('&', 1)
-        prefix = clean_artist(prefix)
-        prefix = _uncomma_artist(prefix) or prefix
+        raw_prefix, feature = t.artist.split('&', 1)
+        prefix = clean_artist(raw_prefix)
+        prefix = uncomma_artist(prefix) or prefix
 
         if prefix in likely_artists:
             total_swaps += 1
-            t.artist = prefix
+            t.artist = (raw_of[prefix].most_common(1)[0][0]
+                        if raw_of.get(prefix) else raw_prefix.strip())
             t.metadata["feature"] = feature.strip()
     questionary.print(f"Completed Swaps {total_swaps}")
 
@@ -2557,8 +2561,14 @@ def main() -> None:
     store = TrackStore()
     try:
         store.load(_CACHE_PATH)
-    except ValueError:
-        pass  # Invalid cache version; start with empty store
+    except ValueError as exc:
+        # An EXISTING cache that will not load must never be silently replaced:
+        # continuing with an empty store means the save-on-exit below would
+        # overwrite the whole library index with nothing. Refuse and let the
+        # user repair/restore it (a missing cache loads empty and is fine).
+        print(f"Cache at {_CACHE_PATH} exists but cannot be loaded: {exc}")
+        print("Repair or remove it (restore from a backup) and rerun.")
+        return
 
     try:
         run_interactive(store)

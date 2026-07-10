@@ -73,6 +73,74 @@ def clean_artist(artist: str) -> str:
     art = art.strip()
     return art
 
+def iter_tracks(node: IndexNode):
+    """Every track under a node, depth-first."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.is_leaf():
+            yield from n.list_tracks()
+        else:
+            stack.extend(n.list_nodes().values())
+
+
+def majority_raw(node: IndexNode, field: str) -> str:
+    """The most common RAW spelling of `field` among a node's tracks.
+
+    Merge/cleanup passes match on clean keys but must DISPLAY a real spelling:
+    writing the clean key back (lowercased, punctuation-stripped) is how the
+    library filled up with 'wind & fire earth'-style display names."""
+    counts: dict[str, int] = {}
+    for t in iter_tracks(node):
+        v = getattr(t, field, "")
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def safe_folder(name: str) -> str:
+    """Folder-safe artist name for the export tree: path separators and other
+    filename-hostile characters become '-', so 'ac/dc' cannot nest an extra
+    directory level (which the export pruner's depth==3 filter never sees)."""
+    return re.sub(r'[\\/:*?"<>|]', "-", name).strip() or "_"
+
+
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
+def uncomma_artist(artist: str) -> str | None:
+    """'Last, First' -> 'First Last' for PERSON names; None when unsafe.
+
+    Learned the hard way (the 'wind & fire earth' incident): band names keep
+    their commas ('Earth, Wind & Fire'), multi-artist credits ('Andrews,
+    Michael Ft. Gary Jules') aren't one person, and generational suffixes
+    relocate ('Davis, Sammy Jr.' -> 'Sammy Davis Jr.'). Callers must treat
+    None as "leave it alone" -- never fall back to a blind swap."""
+    if artist.count(",") != 1:
+        return None
+    last, _, first = artist.partition(",")
+    last, first = last.strip(), first.strip()
+    if not last or not first:
+        return None
+    suffix = ""
+    head = first.split()
+    if len(head) > 1 and head[-1].rstrip(".").lower() in _NAME_SUFFIXES:
+        suffix = " " + head[-1]
+        first = " ".join(head[:-1])
+    joined = f" {last.lower()} {first.lower()} "
+    if "&" in joined or "+" in joined:
+        return None
+    for w in (" and ", " ft ", " ft. ", " feat ", " feat. ", " featuring ",
+              " with ", " the "):
+        if w in joined:
+            return None
+    if len(first.split()) > 3 or len(last.split()) > 3:
+        return None
+    return f"{first} {last}{suffix}"
+
+
 def clean_song(song: str) -> str:
     song = song.lower()
     # "[sc karaoke]"-style brand tags must not distinguish songs: left in, one
