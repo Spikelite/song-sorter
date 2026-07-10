@@ -245,3 +245,50 @@ def test_fragments_match_title_elisions() -> None:
     assert not fragments_match_title(["Place"], "Heaven Is a Place on Earth")
     assert not fragments_match_title(["Bel", "E Again"], "Born Again")
     assert not fragments_match_title([], "Anything")
+
+
+# ---------------------------------------------------------------------------
+# parse_artist_song / is_catalog_segment: catalog-LAST stems (Sunfly zips)
+
+def test_is_catalog_segment() -> None:
+    from track_index import is_catalog_segment
+    for yes in ("SF 193-16", "SFKK-21-00", "EZH-31", "SC8121-03", "DCK927-10"):
+        assert is_catalog_segment(yes), yes
+    # titles that merely look catalog-ish must never qualify
+    for no in ("Old 67", "U2", "Happy 70th Birthday", "Mambo No 5",
+               "Plain Title", "72", ""):
+        assert not is_catalog_segment(no), no
+
+
+def test_parse_catalog_last_stems() -> None:
+    from track_index import parse_artist_song
+    # the Lauren Waterworth case: catalog at the END must not eat the artist
+    assert parse_artist_song(
+        "Lauren Waterworth - Baby Now That I've Found You - SF 193-16") \
+        == ("Lauren Waterworth", "Baby Now That I've Found You")
+    # dashy titles keep their inner segments
+    assert parse_artist_song("A - B - C - SF 193-16") == ("A", "B - C")
+    # title-only with trailing catalog
+    assert parse_artist_song("Some Song Title - SF 193-16") \
+        == ("", "Some Song Title")
+
+
+def test_parse_catalog_first_unchanged() -> None:
+    from track_index import parse_artist_song
+    assert parse_artist_song("SC8121-03 - Beach Boys - Barbara Ann") \
+        == ("Beach Boys", "Barbara Ann")
+    assert parse_artist_song("Beach Boys - Barbara Ann") == ("", "Barbara Ann")
+    assert parse_artist_song("Just A Song Title") == ("", "Just A Song Title")
+    # catalog first AND a catalog-shaped title: first wins, title survives
+    assert parse_artist_song("DCK927-10 - Elton John - Old 67") \
+        == ("Elton John", "Old 67")
+    # compact Disney-style stems still work
+    assert parse_artist_song("DIS61201-13-MARY POPPINS-I LOVE TO LAUGH") \
+        == ("MARY POPPINS", "I LOVE TO LAUGH")
+
+
+def test_split_stem_drops_trailing_catalog() -> None:
+    from track_index import split_stem
+    assert split_stem("Lauren Waterworth - Baby Now - SF 193-16") \
+        == ["Lauren Waterworth", "Baby Now"]
+    assert split_stem("SC81 - Artist - Song") == ["Artist", "Song"]
