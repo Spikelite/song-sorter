@@ -292,3 +292,48 @@ def test_split_stem_drops_trailing_catalog() -> None:
     assert split_stem("Lauren Waterworth - Baby Now - SF 193-16") \
         == ["Lauren Waterworth", "Baby Now"]
     assert split_stem("SC81 - Artist - Song") == ["Artist", "Song"]
+
+
+# ---------------------------------------------------------------------------
+# catalog split across two trailing segments: 'Artist - Song - SF 003 - 03'
+
+def test_is_catalog_segment_relaxed_needs_context() -> None:
+    from track_index import is_catalog_segment
+    # no-dash short-prefix ids ('SF 003') are shape-identical to real titles
+    # (LeVert's 'ABC 123'), so they only qualify under relaxed=True -- callers
+    # must bring disambiguating context (the trailing track-number pair)
+    for ambiguous in ("SF 003", "SF 001", "SF 204", "ABC 123"):
+        assert not is_catalog_segment(ambiguous), ambiguous
+        assert is_catalog_segment(ambiguous, relaxed=True), ambiguous
+    # never catalogs, strict or relaxed
+    for no in ("Blink 182", "Route 66", "Old 67", "Summer of 69", "Mambo No 5"):
+        assert not is_catalog_segment(no), no
+        assert not is_catalog_segment(no, relaxed=True), no
+
+
+def test_parse_catalog_tracknum_pair() -> None:
+    from track_index import parse_artist_song
+    assert parse_artist_song("QUEEN - BOHEMIAN RHAPSODY - SF 003 - 03") \
+        == ("QUEEN", "BOHEMIAN RHAPSODY")
+    assert parse_artist_song(
+        "BILL MEDLEY AND JENNIFER WARN - I'VE HAD THE TIME OF MY LIFE - SF 003 - 04") \
+        == ("BILL MEDLEY AND JENNIFER WARN", "I'VE HAD THE TIME OF MY LIFE")
+    assert parse_artist_song("K W S - PLEASE DON'T GO - SF 003 - 06") \
+        == ("K W S", "PLEASE DON'T GO")
+    # a real title that merely looks catalog-ish must survive: without the
+    # track-number pair, the relaxed shape is never trimmed
+    assert parse_artist_song("Levert - ABC 123") == ("", "ABC 123")
+    # dashy trailing catalogs still trim without needing the pair
+    assert parse_artist_song("Artist - Song - SF 193-16") == ("Artist", "Song")
+    assert parse_artist_song("SC8121-03 - Beach Boys - Barbara Ann") \
+        == ("Beach Boys", "Barbara Ann")
+    assert parse_artist_song("DCK927-10 - Elton John - Old 67") \
+        == ("Elton John", "Old 67")
+    # a bare trailing number WITHOUT a catalog before it is not trimmed
+    assert parse_artist_song("EZH-31 - 04 - Milkshake") == ("04", "Milkshake")
+
+
+def test_split_stem_drops_tracknum_pair() -> None:
+    from track_index import split_stem
+    assert split_stem("QUEEN - BOHEMIAN RHAPSODY - SF 003 - 03") \
+        == ["QUEEN", "BOHEMIAN RHAPSODY"]

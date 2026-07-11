@@ -2289,10 +2289,17 @@ def clean(store: TrackStore) -> None:
     # stem with the catalog-order-aware parser and recover both fields.
     recats = 0
     for t in store.all():
-        if not is_catalog_segment(t.song):
+        if not is_catalog_segment(t.song, relaxed=True):
+            continue
+        # positional guard for the relaxed shape: the catalog-ish song value
+        # must literally be one of the stem's trailing segments, so a real
+        # title that merely looks catalog-ish (LeVert's 'ABC 123') is never
+        # "repaired" away
+        stem_parts = [p.strip() for p in Path(t.path).stem.split(" - ") if p.strip()]
+        if t.song.strip() not in stem_parts[-2:]:
             continue
         a2, s2 = parse_artist_song(Path(t.path).stem)
-        if s2 and not is_catalog_segment(s2):
+        if s2 and s2 != t.song and not is_catalog_segment(s2, relaxed=True):
             t.metadata.setdefault("catalog_id", t.song.strip())
             if a2:
                 t.artist = a2
