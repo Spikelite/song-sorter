@@ -142,19 +142,47 @@ _STEM_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}-?\d[\w-]*$")
 # Stricter shape for a catalog id ANYWHERE in a stem: letter prefix then
 # digits/dashes ONLY ('SF 193-16', 'SFKK-21-00', 'EZH-31'), never trailing
 # words. Titles like 'Old 67' (no dash, few digits) must not qualify.
-_CATALOG_SEG_RE = re.compile(r"^[A-Za-z]{1,6}[- ]?\d[\d\- ]*$")
+_CATALOG_SEG_RE = re.compile(r"^([A-Za-z]{1,6})[- ]?\d[\d\- ]*$")
 
 
-def is_catalog_segment(seg: str) -> bool:
+def is_catalog_segment(seg: str, relaxed: bool = False) -> bool:
     """True when a stem segment is a disc-catalog id like 'SF 193-16'.
 
     Deliberately strict because titles can look catalog-ish: requires the
-    letters+digits shape AND (a dash or 5+ digits) AND length >= 4 -- so
-    'Old 67', 'U2', and 'Happy 70th Birthday' never qualify."""
+    letters-then-digits shape AND a dash ('SF 193-16', 'EZH-31') or 5+
+    digits -- so 'Old 67', 'U2', 'Blink 182' and real titles like LeVert's
+    'ABC 123' never qualify on shape alone.
+
+    relaxed=True additionally accepts 3+ digits behind a short (<=4 letter)
+    prefix ('SF 003'). That form is IDENTICAL in shape to real titles
+    ('ABC 123'), so callers may only use it where surrounding context
+    disambiguates -- e.g. the '... - SF 003 - 03' trailing pair, where the
+    bare track number after it is the tell."""
     t = (seg or "").strip()
-    if len(t.replace(" ", "")) < 4 or not _CATALOG_SEG_RE.fullmatch(t):
+    if len(t.replace(" ", "")) < 4:
         return False
-    return "-" in t or sum(ch.isdigit() for ch in t) >= 5
+    m = _CATALOG_SEG_RE.fullmatch(t)
+    if not m:
+        return False
+    digits = sum(ch.isdigit() for ch in t)
+    if "-" in t or digits >= 5:
+        return True
+    return relaxed and digits >= 3 and len(m.group(1)) <= 4
+
+
+def _trim_trailing_catalog(parts: list[str]) -> list[str]:
+    """Drop trailing catalog markers from stem segments: a plain
+    '... - SF 193-16', or the split pair '... - SF 003 - 03' where the disc
+    writes the catalog id and the bare track number as separate segments.
+    The pair form may use the relaxed catalog shape (the track number after
+    it is the disambiguating context); a single trailing segment must match
+    strictly, so titles like 'ABC 123' are never eaten."""
+    if (len(parts) >= 3 and re.fullmatch(r"\d{1,3}", parts[-1])
+            and is_catalog_segment(parts[-2], relaxed=True)):
+        return parts[:-2]
+    if len(parts) >= 2 and is_catalog_segment(parts[-1]):
+        return parts[:-1]
+    return parts
 
 
 # Compact catalog stems with no spaces around the dashes, e.g.
@@ -170,16 +198,18 @@ def parse_artist_song(stem: str) -> tuple[str, str]:
       - 'Artist - Song - SF 193-16'  (catalog LAST: Sunfly Main Series zips;
         the old parser read these as artist='Song', song='SF 193-16' and
         dropped the real artist entirely)
+      - 'Artist - Song - SF 003 - 03' (catalog last, split across TWO
+        segments: id then bare track number)
       - 'CATALOG-TRACK-ARTIST-SONG'  (compact, no spaced dashes)
     Returns ('', title) when no artist can be inferred."""
     if " - " in stem:
         parts = [p.strip() for p in stem.split(" - ") if p.strip()]
-        if (len(parts) >= 2 and not is_catalog_segment(parts[0])
-                and is_catalog_segment(parts[-1])):
-            parts = parts[:-1]  # catalog-last: 'Artist - Song - SF 193-16'
-            if len(parts) == 1:
-                return "", parts[0]
-            return parts[0], " - ".join(parts[1:])
+        if parts and not is_catalog_segment(parts[0]):
+            trimmed = _trim_trailing_catalog(parts)
+            if len(trimmed) != len(parts) and trimmed:
+                if len(trimmed) == 1:
+                    return "", trimmed[0]
+                return trimmed[0], " - ".join(trimmed[1:])
         if len(parts) > 2:
             # (source) - artist - song
             return parts[1], parts[2]
@@ -200,13 +230,12 @@ def parse_artist_song(stem: str) -> tuple[str, str]:
 
 def split_stem(stem: str) -> list[str]:
     """Filename stem -> ' - '-separated segments, catalog ids dropped
-    (leading or trailing -- disc series differ on where they put them)."""
+    (leading, trailing, or the trailing id+track-number pair -- disc series
+    differ on where they put them)."""
     parts = [p.strip() for p in stem.split(" - ") if p.strip()]
     if parts and _STEM_CATALOG_RE.fullmatch(parts[0].replace(" ", "")):
         parts = parts[1:]
-    if parts and is_catalog_segment(parts[-1]):
-        parts = parts[:-1]
-    return parts
+    return _trim_trailing_catalog(parts)
 
 
 def rejoin_artist(parts: list[str], known: set) -> tuple[str, list[str]] | None:
