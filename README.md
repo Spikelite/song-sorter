@@ -185,6 +185,23 @@ The interactive menu (`python main.py`) operates on a persistent track store
   (ratio ≥ 85).
 
 ### Output
+- **Key-detect** *(offline, optionally online)* — Estimate each song's musical
+  **key** for a pre-song pitch/tone reference (feeds external players such as
+  KriticalDJ). Precedence, per track: a curated **manual override**
+  (`key-overrides.json`) → the MP3's ID3 **`TKEY`** tag → **offline audio
+  detection** (librosa chromagram + Krumhansl–Schmuckler correlation over the
+  first verse, to dodge final-chorus modulation) → **online corroboration**
+  (AcoustID fingerprint → AcousticBrainz). It **gates hard on confidence** — a
+  wrong key is worse than none — so only confident results are written, with a
+  `key_confidence` (0–1) and a `key_source` (`manual`/`tag`/`auto`/`online`)
+  recorded in metadata and later emitted into `index.json` by **Final-final**.
+  Online is **advisory**: AcousticBrainz reports the *original master's* key,
+  which can differ from a transposed karaoke rip, so it only confirms/boosts a
+  local read or fills where there is no local signal — never overriding a
+  confident one. Incremental and resumable (skips tracks already keyed for the
+  current MP3; re-check option for weak/none results). Fully **offline** except
+  the optional AcoustID/AcousticBrainz step; the audio stack
+  (`requirements-key.txt`) is optional — without it, only tags/overrides apply.
 - **Final-final** — For each artist/song group, pick the best copy (largest
   MP3) and export its files into an output tree organized as
   `<output>/<first-letter>/<artist>/<name>.<ext>`, skipping unknown artists.
@@ -193,8 +210,10 @@ The interactive menu (`python main.py`) operates on a persistent track store
   and it can optionally **prune** stale files left by earlier runs (e.g. after
   an artist was renamed), touching only its own `<prefix>/<artist>/<file>` layout.
   Also refreshes a `songbook.html` in the output root (see **Songbook**) and
-  writes an `index.json` library index there (curated artist/title/duration
-  per playable file) for external players such as KriticalDJ.
+  writes an `index.json` library index there (curated artist/title/duration —
+  plus an optional `key`/`key_confidence`/`key_source` (and `key_camelot`) when
+  **Key-detect** has annotated the song — per playable file) for external
+  players such as KriticalDJ.
 - **Songbook** — Generate the digital songbook: a **single self-contained HTML
   file** with every distinct artist+song embedded, searchable instantly in any
   browser — fully offline, zero install, just double-click it. Guest-friendly
@@ -217,10 +236,16 @@ State lives under `.cache/song-sorter/` (git-ignored):
 - **`review-state.json`** — per-track review decisions (e.g. `ok`), kept
   separate from the track data so re-running cleanup never loses review progress.
 - **`config.json`** — remembered settings: the **Final-final** output
-  directory, the **Songbook** name and output path, and an optional
+  directory, the **Songbook** name and output path, an optional
   `"always_review"` list — artist groups (matched on the cleaned name) that
   enter the **Review** queue regardless of size, for garbage buckets that
-  would otherwise outgrow the thin-artist threshold and become invisible.
+  would otherwise outgrow the thin-artist threshold and become invisible — and
+  an optional `"acoustid_api_key"` for **Key-detect**'s online step (or set the
+  `ACOUSTID_API_KEY` environment variable).
+- **`key-overrides.json`** *(optional, hand-curated)* — the source of truth for
+  **Key-detect**: `{ "<artist> - <song>": "A minor", … }` (values in any form —
+  `"A minor"`, `"Am"`, `"8A"` — matched case-insensitively on the track's
+  current artist/song). Wins over every detected key.
 
 Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
 
@@ -243,3 +268,23 @@ Python 3 with
 - [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) (string similarity), 
 - [mutagen](https://mutagen.readthedocs.io/) (MP3 metadata),
 - [tqdm](https://tqdm.github.io/) (progress bars).
+
+### Optional: Key-detect
+
+**Key-detect** is the only feature with extra dependencies, kept out of the base
+install so the rest of the tool stays lightweight and offline. Install them with:
+
+```text
+pip install -r requirements-key.txt
+```
+
+- [librosa](https://librosa.org/) — offline audio key detection (chromagram).
+  Decoding MP3s also needs an audio backend: a modern
+  [soundfile](https://python-soundfile.readthedocs.io/)/libsndfile (≥ 1.1), or
+  [ffmpeg](https://ffmpeg.org/) on your `PATH`.
+- [pyacoustid](https://github.com/beetbox/pyacoustid) *(online step only)* —
+  needs the [Chromaprint](https://acoustid.org/chromaprint) `fpcalc` binary on
+  your `PATH` and a free [AcoustID API key](https://acoustid.org/new-application).
+
+Without these, **Key-detect** still runs — it just falls back to `TKEY` tags and
+`key-overrides.json` only.

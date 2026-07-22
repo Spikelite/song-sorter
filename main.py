@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import re
 import shutil
 import socket
@@ -28,8 +29,10 @@ from track_index import (ArtistIndex, SongIndex, TrackIndex, IndexNode,
                          is_catalog_segment, majority_raw, parse_artist_song,
                          rejoin_artist, safe_folder, split_stem,
                          strip_artist_echo, uncomma_artist)
-from track_inspect import track_details
+from track_inspect import track_details, audio_file, read_key_tag
 from review_state import ReviewState
+import key_detect
+import key_online
 
 
 _CACHE_PATH = Path(__file__).parent / ".cache" / "song-sorter" / "cache.json"
@@ -37,6 +40,7 @@ _REVIEW_STATE_PATH = _CACHE_PATH.parent / "review-state.json"
 _CONFIG_PATH = _CACHE_PATH.parent / "config.json"
 _RESOLUTIONS_PATH = _CACHE_PATH.parent / "resolutions.json"
 _ARTIST_ALIASES_PATH = _CACHE_PATH.parent / "artist-aliases.json"
+_KEY_OVERRIDES_PATH = _CACHE_PATH.parent / "key-overrides.json"
 
 
 def _load_config() -> dict:
@@ -69,6 +73,21 @@ def _load_aliases() -> dict:
     except (ValueError, OSError):
         return {}
     return {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
+
+
+def _load_key_overrides() -> dict:
+    """Curated musical-key overrides -- the source of truth for Key-detect.
+
+    key-overrides.json maps ``"<artist> - <song>"`` (matched case-insensitively
+    on the track's current fields) to a key string in any form normalize_key
+    accepts (``"A minor"``, ``"Am"``, ``"8A"``...). {} when absent/unreadable."""
+    try:
+        with open(_KEY_OVERRIDES_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    src = data.get("overrides", data) if isinstance(data, dict) else {}
+    return {str(k).strip().lower(): v for k, v in src.items() if v}
 
 
 def _default_scan_dir(store: TrackStore) -> str:
@@ -1502,6 +1521,163 @@ def review_mode(store: TrackStore) -> None:
             i += 1
 
 
+# Offline detection this confident needs no online confirmation -- skip the
+# network call (and spare the AcoustID quota) once we're already sure.
+_ONLINE_CORROBORATE_BELOW = 0.85
+
+
+def _apply_key_result(track: Track, result: dict, sig: str) -> None:
+    """Write a fused key result onto a track's metadata (or clear it)."""
+    track.metadata["key_sig"] = sig
+    track.metadata["key_source"] = result["source"]
+    track.metadata["key_detail"] = result.get("detail", "")
+    if result["key"]:
+        track.metadata["key"] = result["key"]
+        track.metadata["key_confidence"] = f"{result['confidence']:.3f}"
+        cam = key_detect.to_camelot(result["key"])
+        if cam:
+            track.metadata["key_camelot"] = cam
+        else:
+            track.metadata.pop("key_camelot", None)
+    else:
+        for k in ("key", "key_confidence", "key_camelot"):
+            track.metadata.pop(k, None)
+
+
+def detect_keys(store: TrackStore) -> None:
+    """(offline + online) Estimate each track's musical key for a pre-song pitch
+    reference, writing key / key_confidence / key_source into metadata (which
+    Final-final then emits into index.json for players like KriticalDJ).
+
+    Precedence: manual override > ID3 TKEY tag > offline audio detection
+    (librosa chromagram + Krumhansl-Schmuckler over the first verse) > online
+    corroboration (AcoustID + AcousticBrainz). Online is advisory -- it reports
+    the original master's key, not the transposed rip -- so it only lifts a
+    weak offline read when it agrees, or fills where there's no local signal.
+
+    Incremental & resumable: a track is skipped when it already carries a key
+    computed from the current MP3 (key_sig == mp3_hash), unless you opt to
+    re-check weak/none results. Offline detection needs librosa; online needs
+    fpcalc + a free AcoustID key -- each degrades gracefully when absent."""
+    cfg = _load_config()
+
+    # --- capability + online setup ----------------------------------------
+    if not key_detect.HAVE_LIBROSA:
+        questionary.print(
+            "librosa not installed -- offline audio key detection is unavailable "
+            "(install with: pip install -r requirements-key.txt).")
+    online_enabled = False
+    api_key = ""
+    if key_online.HAVE_ACOUSTID:
+        if _is_online("api.acoustid.org"):
+            api_key = cfg.get("acoustid_api_key", "") or os.environ.get("ACOUSTID_API_KEY", "")
+            if not api_key:
+                questionary.print(
+                    "Online corroboration uses AcoustID + AcousticBrainz. It needs a "
+                    "free AcoustID API key: https://acoustid.org/new-application")
+                ans = questionary.text("AcoustID API key (blank to skip online):").ask()
+                if ans and ans.strip():
+                    api_key = ans.strip()
+                    cfg["acoustid_api_key"] = api_key
+                    _save_config(cfg)
+            online_enabled = bool(api_key)
+        else:
+            questionary.print("AcoustID unreachable -- offline detection only.")
+    else:
+        questionary.print(
+            "pyacoustid/fpcalc not installed -- online corroboration unavailable "
+            "(offline only).")
+    if online_enabled:
+        questionary.print(
+            "Online corroboration ON. Note: AcousticBrainz reports the ORIGINAL "
+            "master's key, which can differ from a transposed karaoke rip; it is "
+            "used only to confirm/fill, never to override a confident local read.")
+
+    if not key_detect.HAVE_LIBROSA and not online_enabled:
+        if not questionary.confirm(
+                "Only ID3 TKEY tags and manual overrides are available. Continue?",
+                default=False).ask():
+            return
+
+    recheck = questionary.confirm(
+        "Re-check tracks previously scored none/online/low-confidence?",
+        default=False).ask()
+
+    overrides = _load_key_overrides()
+
+    # --- build the work list ----------------------------------------------
+    def _needs_work(t: Track) -> bool:
+        if "mp3" not in t.file_types and "zip" not in t.file_types:
+            return False  # no playable audio to analyse
+        # A curated override must always win, even over a track already keyed
+        # confidently on a previous run -- so never skip an overridden track.
+        if f"{t.artist} - {t.song}".strip().lower() in overrides:
+            return True
+        sig = t.metadata.get("mp3_hash", "")
+        done = bool(sig) and t.metadata.get("key_sig") == sig
+        if not done:
+            return True
+        if not recheck:
+            return False
+        src = t.metadata.get("key_source", "")
+        try:
+            conf = float(t.metadata.get("key_confidence", "0") or 0)
+        except ValueError:
+            conf = 0.0
+        return src in ("none", "online") or (src == "auto" and conf < key_detect.EMIT_FLOOR)
+
+    todo = [t for t in store.all() if _needs_work(t)]
+    if not todo:
+        questionary.print("No tracks need key detection.")
+        return
+    missing_detail = sum(1 for t in todo if not t.metadata.get("mp3_hash"))
+    if missing_detail:
+        questionary.print(
+            f"{missing_detail} track(s) have no mp3_hash -- run Detail first so key "
+            "results can be cached/skipped on re-runs.")
+
+    # --- detect ------------------------------------------------------------
+    counts: dict[str, int] = collections.Counter()
+    mbid_cache: dict[str, str | None] = {}
+    last_save = time.monotonic()
+    processed = 0
+    for track in tqdm(todo, desc="Key-detect", unit="track"):
+        sig = track.metadata.get("mp3_hash", "")
+        ov = overrides.get(f"{track.artist} - {track.song}".strip().lower())
+        tag = offline = online = None
+        if ov is None:  # an override needs no file access at all
+            with audio_file(track.path, track.file_types) as mp3_path:
+                if mp3_path is not None:
+                    tag = read_key_tag(mp3_path)
+                    offline = key_detect.detect_key_offline(str(mp3_path))
+                    if online_enabled and (offline is None
+                                           or offline[1] < _ONLINE_CORROBORATE_BELOW):
+                        try:
+                            okey, _detail = key_online.lookup_online(
+                                str(mp3_path), api_key, mbid_cache)
+                            online = okey
+                        except Exception:
+                            online = None
+        result = key_detect.combine_key_signals(
+            override=ov, tag=tag, offline=offline, online=online)
+        _apply_key_result(track, result, sig)
+        counts[result["source"]] += 1
+        processed += 1
+        if time.monotonic() - last_save >= 300:
+            store.save(_CACHE_PATH)
+            last_save = time.monotonic()
+
+    store.save(_CACHE_PATH)
+    emitted = sum(1 for t in store.all()
+                  if key_detect.should_emit(t.metadata.get("key_source", "none"),
+                                            float(t.metadata.get("key_confidence", "0") or 0)))
+    questionary.print(
+        f"Key-detect: processed {processed} -- "
+        f"manual {counts['manual']}, tag {counts['tag']}, auto {counts['auto']}, "
+        f"online {counts['online']}, none {counts['none']}. "
+        f"{emitted} song(s) now carry an index-worthy key.")
+
+
 def apply_resolutions(store: TrackStore) -> None:
     """Apply a curated resolutions file to the store (dry-run first).
 
@@ -1840,6 +2016,24 @@ def tracks_to_keep(store: TrackStore) -> None:
                 "title": best.song,
                 "duration": _dur(best),
             }
+            # Optional musical key for a pre-song pitch reference (KriticalDJ
+            # #15). Emitted only when confident enough (Key-detect gates auto/
+            # online on the emit floor; manual/tag always pass), so a player can
+            # trust its presence and light the feature up gradually. Fields are
+            # omitted entirely otherwise -- backward compatible with readers
+            # that don't know about keys.
+            m = best.metadata
+            try:
+                _kconf = float(m.get("key_confidence", "0") or 0)
+            except ValueError:
+                _kconf = 0.0
+            if m.get("key") and key_detect.should_emit(
+                    m.get("key_source", "none"), _kconf):
+                entry["key"] = m["key"]
+                entry["key_confidence"] = round(_kconf, 3)
+                entry["key_source"] = m.get("key_source", "")
+                if m.get("key_camelot"):
+                    entry["key_camelot"] = m["key_camelot"]
             # Extra copies (up to version_limit total) are exported alongside
             # and listed as selectable versions. Label = the source's folder
             # (usually the karaoke brand/disc) so the KJ can tell them apart.
@@ -2598,6 +2792,7 @@ def run_interactive(store: TrackStore) -> None:
         "fixup",
         "fix-artist",
         "fix-unknown",
+        "key-detect",
         "all-clean",
         "clean",
         "tag-fill",
@@ -2609,7 +2804,9 @@ def run_interactive(store: TrackStore) -> None:
         "fuzz_song",
         "exit",
     ]
-    online = {"musicbrainz", "restitch"}  # need internet, flagged in the menu
+    # key-detect can use the network (AcoustID/AcousticBrainz) but degrades to
+    # fully offline, so it's marked online to flag the optional internet use.
+    online = {"musicbrainz", "restitch", "key-detect"}  # need internet, flagged in the menu
 
     # Menu layout: workflow-ordered sections for the main screen; the granular
     # one-off cleaners live in an Advanced submenu (All-clean chains them). The
@@ -2622,7 +2819,7 @@ def run_interactive(store: TrackStore) -> None:
         ("Review & fix", ["review", "fixup", "fix-artist", "fix-unknown"]),
         ("Organize", ["unify-artists"]),
         ("Inspect", ["browse", "artist", "song", "list", "stats"]),
-        ("Output", ["final-final", "songbook"]),
+        ("Output", ["key-detect", "final-final", "songbook"]),
     ]
     advanced = ["clean", "tag-fill", "unswap", "uncomma", "trailing-article",
                 "ungroup", "fuzz", "fuzz_song"]
@@ -2678,6 +2875,8 @@ def run_interactive(store: TrackStore) -> None:
             browse_artist(store)
         elif result == "song":
             browse_song(store)
+        elif result == "key-detect":
+            detect_keys(store)
         elif result == "final-final":
             tracks_to_keep(store)
         elif result == "songbook":
