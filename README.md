@@ -198,8 +198,10 @@ The interactive menu (`python main.py`) operates on a persistent track store
   Online is **advisory**: AcousticBrainz reports the *original master's* key,
   which can differ from a transposed karaoke rip, so it only confirms/boosts a
   local read or fills where there is no local signal — never overriding a
-  confident one. Incremental and resumable (skips tracks already keyed for the
-  current MP3; re-check option for weak/none results). Fully **offline** except
+  confident one. **Every copy is keyed independently** — alternates exported as
+  `versions[]` get their own key, since different brands' rips of one song are
+  often in different keys. Incremental and resumable (skips tracks already keyed
+  for the current MP3; re-check option for weak/none results). Fully **offline** except
   the optional AcoustID/AcousticBrainz step; the audio stack
   (`requirements-key.txt`) is optional — without it, only tags/overrides apply.
 - **Final-final** — For each artist/song group, pick the best copy (largest
@@ -213,7 +215,10 @@ The interactive menu (`python main.py`) operates on a persistent track store
   writes an `index.json` library index there (curated artist/title/duration —
   plus an optional `key`/`key_confidence`/`key_source` (and `key_camelot`) when
   **Key-detect** has annotated the song — per playable file) for external
-  players such as KriticalDJ.
+  players such as KriticalDJ. Key fields are **per copy**: each entry in
+  `versions[]` carries its own key, never the best copy's, because alternate
+  rips from different karaoke brands are frequently transposed relative to each
+  other. A copy without a confident key of its own simply carries no key fields.
 - **Songbook** — Generate the digital songbook: a **single self-contained HTML
   file** with every distinct artist+song embedded, searchable instantly in any
   browser — fully offline, zero install, just double-click it. Guest-friendly

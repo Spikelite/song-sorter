@@ -2022,18 +2022,7 @@ def tracks_to_keep(store: TrackStore) -> None:
             # trust its presence and light the feature up gradually. Fields are
             # omitted entirely otherwise -- backward compatible with readers
             # that don't know about keys.
-            m = best.metadata
-            try:
-                _kconf = float(m.get("key_confidence", "0") or 0)
-            except ValueError:
-                _kconf = 0.0
-            if m.get("key") and key_detect.should_emit(
-                    m.get("key_source", "none"), _kconf):
-                entry["key"] = m["key"]
-                entry["key_confidence"] = round(_kconf, 3)
-                entry["key_source"] = m.get("key_source", "")
-                if m.get("key_camelot"):
-                    entry["key_camelot"] = m["key_camelot"]
+            entry.update(key_detect.key_index_fields(best.metadata))
             # Extra copies (up to version_limit total) are exported alongside
             # and listed as selectable versions. Label = the source's folder
             # (usually the karaoke brand/disc) so the KJ can tell them apart.
@@ -2046,11 +2035,18 @@ def tracks_to_keep(store: TrackStore) -> None:
                 for exn in alt.file_types:
                     expected[output_root / prefix / artist / f"{astem}.{exn}"] = \
                         Path(alt.path).with_suffix(f".{exn}")
-                versions.append({
+                # Each alternate publishes its OWN key, never the best copy's:
+                # rips from different karaoke brands are often transposed
+                # relative to each other, so a shared key would be wrong for
+                # whichever copy didn't produce it. An alternate without a
+                # confident key of its own simply carries none.
+                ventry = {
                     "path": f"{prefix}/{artist}/{astem}.{aext}",
                     "label": Path(alt.path).parent.name or "Alternate",
                     "duration": _dur(alt),
-                })
+                }
+                ventry.update(key_detect.key_index_fields(alt.metadata))
+                versions.append(ventry)
             if versions:
                 entry["versions"] = versions
             index_entries.append(entry)

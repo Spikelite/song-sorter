@@ -9,6 +9,7 @@ from key_detect import (
     _KS_MINOR,
     KEY_NAMES,
     combine_key_signals,
+    key_index_fields,
     keys_agree,
     normalize_key,
     pcp_to_key,
@@ -182,6 +183,55 @@ def test_should_emit_gating() -> None:
     assert not should_emit("auto", 0.49)
     assert should_emit("online", 0.5)
     assert not should_emit("none", 1.0)
+
+
+# --- key_index_fields (per-copy index emission) -----------------------------
+
+def test_index_fields_emitted_for_confident_copy() -> None:
+    md = {"key": "A minor", "key_confidence": "0.812", "key_source": "auto",
+          "key_camelot": "8A"}
+    assert key_index_fields(md) == {
+        "key": "A minor", "key_confidence": 0.812, "key_source": "auto",
+        "key_camelot": "8A",
+    }
+
+
+def test_index_fields_omitted_below_emit_floor() -> None:
+    md = {"key": "A minor", "key_confidence": "0.30", "key_source": "auto"}
+    assert key_index_fields(md) == {}
+
+
+def test_index_fields_omitted_when_unkeyed() -> None:
+    assert key_index_fields({}) == {}
+    assert key_index_fields({"key_source": "none"}) == {}
+
+
+def test_index_fields_tag_and_manual_always_emit() -> None:
+    assert key_index_fields(
+        {"key": "C major", "key_confidence": "0.0", "key_source": "manual"}
+    )["key"] == "C major"
+    assert key_index_fields(
+        {"key": "C major", "key_confidence": "0.1", "key_source": "tag"}
+    )["key"] == "C major"
+
+
+def test_index_fields_tolerate_bad_confidence() -> None:
+    md = {"key": "A minor", "key_confidence": "not-a-number", "key_source": "manual"}
+    assert key_index_fields(md)["key_confidence"] == 0.0
+
+
+def test_each_copy_publishes_its_own_key_not_a_shared_one() -> None:
+    """Alternate karaoke rips are frequently transposed relative to each other,
+    so the best copy's key must never leak onto an alternate (KDJ #15 gap)."""
+    best = {"key": "A minor", "key_confidence": "0.90", "key_source": "auto"}
+    transposed_alt = {"key": "B minor", "key_confidence": "0.88", "key_source": "auto"}
+    unkeyed_alt = {"key_source": "none"}
+
+    assert key_index_fields(best)["key"] == "A minor"
+    assert key_index_fields(transposed_alt)["key"] == "B minor"
+    # An alternate we couldn't key confidently publishes nothing at all, rather
+    # than inheriting a sibling's key.
+    assert key_index_fields(unkeyed_alt) == {}
 
 
 # --- graceful degradation when the optional audio stack is absent -----------

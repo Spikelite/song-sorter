@@ -265,6 +265,32 @@ def should_emit(source: str, confidence: float) -> bool:
     return False
 
 
+def key_index_fields(metadata: dict) -> dict:
+    """The key fields to publish in index.json for ONE playable copy, or {}.
+
+    Every copy is keyed independently and must publish only its *own* key.
+    Alternate karaoke rips of the same song (different brands/discs) are
+    frequently transposed relative to each other, so attributing the best
+    copy's key to an alternate would hand a singer the wrong starting note --
+    precisely the "wrong key is worse than none" failure this feature exists to
+    avoid. A copy with no confident key of its own simply publishes nothing."""
+    key = metadata.get("key")
+    if not key:
+        return {}
+    try:
+        conf = float(metadata.get("key_confidence", "0") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    source = metadata.get("key_source", "none")
+    if not should_emit(source, conf):
+        return {}
+    fields = {"key": key, "key_confidence": round(conf, 3), "key_source": source}
+    camelot = metadata.get("key_camelot")
+    if camelot:
+        fields["key_camelot"] = camelot
+    return fields
+
+
 # --- optional offline audio detection --------------------------------------
 
 # Analyse the first verse only: skip a lead-in, take a window long enough to be
