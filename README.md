@@ -127,6 +127,27 @@ The interactive menu (`python main.py`) operates on a persistent track store
   on a real run sets the fields, marks each track reviewed, and records
   provenance (`artist_from = resolutions`). Paths not in the store are skipped;
   entries that omit a field leave it unchanged.
+- **Key-detect** *(offline, optionally online)* — Estimate each song's musical
+  **key** for a pre-song pitch/tone reference (feeds external players such as
+  KriticalDJ). Run it **last** in the clean/identify chain: `key-overrides.json`
+  is matched on `"<artist> - <song>"`, so it wants names already settled.
+  Precedence, per track: a curated **manual override**
+  (`key-overrides.json`) → the MP3's ID3 **`TKEY`** tag → **offline audio
+  detection** (librosa chromagram + Krumhansl–Schmuckler correlation over the
+  first verse, to dodge final-chorus modulation) → **online corroboration**
+  (AcoustID fingerprint → AcousticBrainz). It **gates hard on confidence** — a
+  wrong key is worse than none — so only confident results are written, with a
+  `key_confidence` (0–1) and a `key_source` (`manual`/`tag`/`auto`/`online`)
+  recorded in metadata and later emitted into `index.json` by **Final-final**.
+  Online is **advisory**: AcousticBrainz reports the *original master's* key,
+  which can differ from a transposed karaoke rip, so it only confirms/boosts a
+  local read or fills where there is no local signal — never overriding a
+  confident one. **Every copy is keyed independently** — alternates exported as
+  `versions[]` get their own key, since different brands' rips of one song are
+  often in different keys. Incremental and resumable (skips tracks already keyed
+  for the current MP3; re-check option for weak/none results). Fully **offline** except
+  the optional AcoustID/AcousticBrainz step; the audio stack
+  (`requirements-key.txt`) is optional — without it, only tags/overrides apply.
 - **Unify-artists** — Merge duplicate/variant artist spellings to one canonical
   name using a curated `artist-aliases.json` (`{variant: canonical}`). Prompts
   for a **dry run** first (lists every rename and how many tracks it touches),
@@ -185,25 +206,6 @@ The interactive menu (`python main.py`) operates on a persistent track store
   (ratio ≥ 85).
 
 ### Output
-- **Key-detect** *(offline, optionally online)* — Estimate each song's musical
-  **key** for a pre-song pitch/tone reference (feeds external players such as
-  KriticalDJ). Precedence, per track: a curated **manual override**
-  (`key-overrides.json`) → the MP3's ID3 **`TKEY`** tag → **offline audio
-  detection** (librosa chromagram + Krumhansl–Schmuckler correlation over the
-  first verse, to dodge final-chorus modulation) → **online corroboration**
-  (AcoustID fingerprint → AcousticBrainz). It **gates hard on confidence** — a
-  wrong key is worse than none — so only confident results are written, with a
-  `key_confidence` (0–1) and a `key_source` (`manual`/`tag`/`auto`/`online`)
-  recorded in metadata and later emitted into `index.json` by **Final-final**.
-  Online is **advisory**: AcousticBrainz reports the *original master's* key,
-  which can differ from a transposed karaoke rip, so it only confirms/boosts a
-  local read or fills where there is no local signal — never overriding a
-  confident one. **Every copy is keyed independently** — alternates exported as
-  `versions[]` get their own key, since different brands' rips of one song are
-  often in different keys. Incremental and resumable (skips tracks already keyed
-  for the current MP3; re-check option for weak/none results). Fully **offline** except
-  the optional AcoustID/AcousticBrainz step; the audio stack
-  (`requirements-key.txt`) is optional — without it, only tags/overrides apply.
 - **Final-final** — For each artist/song group, pick the best copy (largest
   MP3) and export its files into an output tree organized as
   `<output>/<first-letter>/<artist>/<name>.<ext>`, skipping unknown artists.

@@ -2809,13 +2809,16 @@ def run_interactive(store: TrackStore) -> None:
     # flat `options` list above stays the source of truth for the docs test.
     sections = [
         ("Build library", ["search", "detail", "refresh"]),
+        # key-detect goes last here: it's a store-enriching identify step (like
+        # musicbrainz/restitch), not an output artifact, and key-overrides.json
+        # matches on "<artist> - <song>", so it wants names already settled.
         ("Clean & identify  (run in order)",
          ["all-clean", "tag-swap", "tag-review", "musicbrainz", "restitch",
-          "apply-resolutions"]),
+          "apply-resolutions", "key-detect"]),
         ("Review & fix", ["review", "fixup", "fix-artist", "fix-unknown"]),
         ("Organize", ["unify-artists"]),
         ("Inspect", ["browse", "artist", "song", "list", "stats"]),
-        ("Output", ["key-detect", "final-final", "songbook"]),
+        ("Output", ["final-final", "songbook"]),
     ]
     advanced = ["clean", "tag-fill", "unswap", "uncomma", "trailing-article",
                 "ungroup", "fuzz", "fuzz_song"]
