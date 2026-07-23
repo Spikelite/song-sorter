@@ -243,6 +243,23 @@ def test_detect_key_offline_degrades_without_librosa() -> None:
         assert key_detect.detect_key_offline("does-not-exist.mp3") is None
 
 
+def test_quiet_native_stderr_suppresses_then_restores(capfd) -> None:
+    """MP3 decoders under librosa write to fd 2 directly, bypassing Python's
+    warnings machinery -- so the redirect must work at the descriptor level, and
+    must put fd 2 back afterwards."""
+    import os
+
+    from key_detect import _quiet_native_stderr
+
+    with _quiet_native_stderr():
+        os.write(2, b"SHOULD-NOT-APPEAR")
+    os.write(2, b"SHOULD-APPEAR")
+
+    _out, err = capfd.readouterr()
+    assert "SHOULD-NOT-APPEAR" not in err
+    assert "SHOULD-APPEAR" in err
+
+
 def test_analyze_local_never_raises_and_is_picklable() -> None:
     """The worker entry point for the process pool: it must return a result dict
     for any input (missing file, unreadable zip, optional deps absent) rather

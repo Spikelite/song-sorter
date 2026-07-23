@@ -27,8 +27,11 @@ Canonical key spelling uses sharps for the five black keys
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 import re
+import sys
 import warnings
 
 # --- optional heavy dependency, guarded ------------------------------------
@@ -306,6 +309,46 @@ _WINDOW_SECONDS = 45.0
 # nothing instead -- consistent with "a wrong key is worse than none".
 _SILENCE_FLOOR = 1e-4
 
+# The descriptor C libraries write errors to, irrespective of Python's sys.stderr.
+_STDERR_FD = 2
+
+
+@contextlib.contextmanager
+def _quiet_native_stderr():
+    """Silence C-level stderr for the duration of the block.
+
+    The MP3 decoders under librosa (libmpg123/ffmpeg) write complaints about
+    dodgy ID3 frames -- e.g. "No comment text / valid description?" -- straight
+    to file descriptor 2. That bypasses Python's warnings machinery entirely, so
+    the only way to keep a long batch's progress bar readable is to redirect the
+    fd itself. Karaoke rips have malformed tags constantly; the messages are
+    harmless and per-file, so they'd otherwise drown the output.
+
+    In a worker process this only affects that worker's own fd, leaving the
+    parent's progress bar untouched.
+
+    Note we redirect descriptor 2 itself, not ``sys.stderr.fileno()``: a native
+    library writes to fd 2 whatever ``sys.stderr`` happens to be rebound to, and
+    asking a replaced stderr object for its descriptor can raise or hand back a
+    different fd -- either way leaving the native output unsuppressed."""
+    try:
+        saved = os.dup(_STDERR_FD)
+    except OSError:        # no usable stderr to redirect; nothing to suppress
+        yield
+        return
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        try:
+            sys.stderr.flush()   # don't strand buffered output in devnull
+        except Exception:
+            pass
+        os.dup2(devnull, _STDERR_FD)
+        yield
+    finally:
+        os.dup2(saved, _STDERR_FD)
+        os.close(devnull)
+        os.close(saved)
+
 
 def detect_key_offline(audio_path: str) -> tuple[str, float] | None:
     """Estimate (key, confidence) from a decodable audio file, or None.
@@ -317,9 +360,10 @@ def detect_key_offline(audio_path: str) -> tuple[str, float] | None:
     if not HAVE_LIBROSA:
         return None
     try:
-        with warnings.catch_warnings():
-            # librosa warns per-file on silent/degenerate windows; we detect and
-            # reject those ourselves below, so keep the batch output readable.
+        with warnings.catch_warnings(), _quiet_native_stderr():
+            # librosa warns per-file on silent/degenerate windows (and the native
+            # decoder complains about malformed ID3 frames); we detect and reject
+            # bad windows ourselves below, so keep the batch output readable.
             warnings.simplefilter("ignore")
             y, sr = librosa.load(audio_path, mono=True, offset=_OFFSET_SECONDS,
                                  duration=_WINDOW_SECONDS)
