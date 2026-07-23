@@ -127,6 +127,30 @@ The interactive menu (`python main.py`) operates on a persistent track store
   on a real run sets the fields, marks each track reviewed, and records
   provenance (`artist_from = resolutions`). Paths not in the store are skipped;
   entries that omit a field leave it unchanged.
+- **Key-detect** *(offline, optionally online)* — Estimate each song's musical
+  **key** for a pre-song pitch/tone reference (feeds external players such as
+  KriticalDJ). Run it **last** in the clean/identify chain: `key-overrides.json`
+  is matched on `"<artist> - <song>"`, so it wants names already settled.
+  Precedence, per track: a curated **manual override**
+  (`key-overrides.json`) → the MP3's ID3 **`TKEY`** tag → **offline audio
+  detection** (librosa chromagram + Krumhansl–Schmuckler correlation over the
+  first verse, to dodge final-chorus modulation) → **online corroboration**
+  (MusicBrainz text search → AcousticBrainz — plain HTTP, no API key or
+  fingerprinting). It **gates hard on confidence** — a
+  wrong key is worse than none — so only confident results are written, with a
+  `key_confidence` (0–1) and a `key_source` (`manual`/`tag`/`auto`/`online`)
+  recorded in metadata and later emitted into `index.json` by **Final-final**.
+  Online is **advisory**: AcousticBrainz reports the *original master's* key,
+  which can differ from a transposed karaoke rip, so it only confirms/boosts a
+  local read or fills where there is no local signal — never overriding a
+  confident one. **Every copy is keyed independently** — alternates exported as
+  `versions[]` get their own key, since different brands' rips of one song are
+  often in different keys. Incremental and resumable (skips tracks already keyed
+  for the current MP3; re-check option for weak/none results). Fully **offline**
+  except the optional MusicBrainz/AcousticBrainz corroboration (which needs no
+  extra packages — just internet); the offline audio stack
+  (`requirements-key.txt`) is optional — without it, only tags/overrides (and
+  online corroboration, if enabled) apply.
 - **Unify-artists** — Merge duplicate/variant artist spellings to one canonical
   name using a curated `artist-aliases.json` (`{variant: canonical}`). Prompts
   for a **dry run** first (lists every rename and how many tracks it touches),
@@ -193,8 +217,13 @@ The interactive menu (`python main.py`) operates on a persistent track store
   and it can optionally **prune** stale files left by earlier runs (e.g. after
   an artist was renamed), touching only its own `<prefix>/<artist>/<file>` layout.
   Also refreshes a `songbook.html` in the output root (see **Songbook**) and
-  writes an `index.json` library index there (curated artist/title/duration
-  per playable file) for external players such as KriticalDJ.
+  writes an `index.json` library index there (curated artist/title/duration —
+  plus an optional `key`/`key_confidence`/`key_source` (and `key_camelot`) when
+  **Key-detect** has annotated the song — per playable file) for external
+  players such as KriticalDJ. Key fields are **per copy**: each entry in
+  `versions[]` carries its own key, never the best copy's, because alternate
+  rips from different karaoke brands are frequently transposed relative to each
+  other. A copy without a confident key of its own simply carries no key fields.
 - **Songbook** — Generate the digital songbook: a **single self-contained HTML
   file** with every distinct artist+song embedded, searchable instantly in any
   browser — fully offline, zero install, just double-click it. Guest-friendly
@@ -221,6 +250,10 @@ State lives under `.cache/song-sorter/` (git-ignored):
   `"always_review"` list — artist groups (matched on the cleaned name) that
   enter the **Review** queue regardless of size, for garbage buckets that
   would otherwise outgrow the thin-artist threshold and become invisible.
+- **`key-overrides.json`** *(optional, hand-curated)* — the source of truth for
+  **Key-detect**: `{ "<artist> - <song>": "A minor", … }` (values in any form —
+  `"A minor"`, `"Am"`, `"8A"` — matched case-insensitively on the track's
+  current artist/song). Wins over every detected key.
 
 Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
 
@@ -243,3 +276,23 @@ Python 3 with
 - [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) (string similarity), 
 - [mutagen](https://mutagen.readthedocs.io/) (MP3 metadata),
 - [tqdm](https://tqdm.github.io/) (progress bars).
+
+### Optional: Key-detect
+
+**Key-detect**'s *offline* audio detection is the only feature with an extra
+dependency, kept out of the base install so the rest of the tool stays
+lightweight. Its *online* corroboration (MusicBrainz → AcousticBrainz) needs no
+extra packages — it's plain HTTP, just an internet connection. Install the
+offline stack with:
+
+```text
+pip install -r requirements-key.txt
+```
+
+- [librosa](https://librosa.org/) — offline audio key detection (chromagram).
+  Decoding MP3s also needs an audio backend: a modern
+  [soundfile](https://python-soundfile.readthedocs.io/)/libsndfile (≥ 1.1), or
+  [ffmpeg](https://ffmpeg.org/) on your `PATH`.
+
+Without it, **Key-detect** still runs — it just falls back to `TKEY` tags,
+`key-overrides.json`, and (when online) MusicBrainz/AcousticBrainz corroboration.

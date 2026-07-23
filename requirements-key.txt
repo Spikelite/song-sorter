@@ -1,0 +1,11 @@
+# Optional dependency for the Key-detect feature's OFFLINE audio key detection
+# (chromagram + Krumhansl-Schmuckler). Not required by the rest of song-sorter,
+# and not required for Key-detect's online step (MusicBrainz -> AcousticBrainz,
+# which is plain HTTP and needs no extra packages) -- install only if you want
+# offline, on-device key detection of the actual karaoke rip.
+#
+#   pip install -r requirements-key.txt
+#
+# librosa pulls in numpy/scipy/numba/soundfile. Decoding MP3s also needs an audio
+# backend: a modern soundfile/libsndfile (>=1.1), or ffmpeg on your PATH.
+librosa>=0.10,<0.12

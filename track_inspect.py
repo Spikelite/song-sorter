@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
+from contextlib import contextmanager
 from sys import exc_info
 import zipfile_deflate64 as zipfile   # adds Deflate64 (method 9); supersets stdlib zipfile
 import zlib
@@ -12,6 +15,14 @@ from tqdm import tqdm
 
 from mutagen.mp3 import MP3
 from mutagen.easyid3 import EasyID3
+
+# TKEY (initial musical key) isn't in EasyID3's default whitelist; register it so
+# it can be read alongside the other tags. Harmless if a mutagen version already
+# knows it.
+try:
+    EasyID3.RegisterTextKey("initialkey", "TKEY")
+except Exception:  # pragma: no cover - depends on mutagen version internals
+    pass
 
 
 def _compute_hash(data: bytes) -> str:
@@ -56,6 +67,7 @@ _TAG_FIELDS = {
     "tag_album": "album",
     "tag_year": "date",
     "tag_genre": "genre",
+    "tag_key": "initialkey",   # ID3 TKEY -- musical key, near-never populated but free to read
 }
 
 
@@ -201,3 +213,76 @@ def track_details(path: str | Path) -> dict[str, str]:
             return {"error": str(e)}
 
     return {}
+
+
+def _zip_mp3_member(zf) -> str | None:
+    """Name of the first .mp3 member in an open zip, or None."""
+    for n in zf.namelist():
+        if not n.endswith("/") and Path(n).name.lower().endswith(".mp3"):
+            return n
+    return None
+
+
+@contextmanager
+def audio_file(base_path: str, file_types: list[str]):
+    """Yield a real filesystem path to a track's MP3, or None if there isn't one.
+
+    Offline key detection (librosa decode) needs a genuine file path, not bytes.
+    A loose ``.mp3`` is handed back directly; an MP3 packed in a
+    ``.zip`` is extracted to a temp file that is deleted on exit. ``base_path``
+    is the store's path with any extension; ``file_types`` its recorded types.
+
+    Any failure to obtain the audio yields None rather than raising, so callers
+    degrade gracefully; a caller's own error still propagates untouched."""
+    p = Path(base_path)
+    if "mp3" in file_types:
+        mp3 = p.with_suffix(".mp3")
+        yield mp3 if mp3.exists() else None
+        return
+    if "zip" not in file_types:
+        yield None
+        return
+
+    # Extract the zip's MP3 member to a temp file up front (best-effort). All
+    # setup errors are resolved BEFORE the single yield, so the yield sits in a
+    # bare try/finally -- an exception thrown back in by the caller's `with`
+    # body then propagates cleanly instead of triggering a second yield.
+    tmp_path = None   # a file that now exists on disk and must be cleaned up
+    ok = False
+    try:
+        data = None
+        with zipfile.ZipFile(p.with_suffix(".zip"), "r") as zf:
+            member = _zip_mp3_member(zf)
+            if member is not None:
+                data, _ = _read_member(zf, member)
+        if data is not None:
+            fd, tmp = tempfile.mkstemp(suffix=".mp3")
+            tmp_path = tmp
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            ok = True
+    except Exception:
+        ok = False
+    try:
+        yield Path(tmp_path) if ok else None
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def read_key_tag(mp3_path: str | Path) -> str | None:
+    """Read the ID3 TKEY (initial key) from an MP3 path; None if absent/unreadable."""
+    try:
+        audio = MP3(str(mp3_path), ID3=EasyID3)
+    except Exception:
+        return None
+    if audio.tags is None:
+        return None
+    values = audio.tags.get("initialkey")
+    if values:
+        value = str(values[0]).strip()
+        return value or None
+    return None
