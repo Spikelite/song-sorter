@@ -227,8 +227,8 @@ def _zip_mp3_member(zf) -> str | None:
 def audio_file(base_path: str, file_types: list[str]):
     """Yield a real filesystem path to a track's MP3, or None if there isn't one.
 
-    Key detection (librosa decode, fpcalc fingerprint) needs a genuine file
-    path, not bytes. A loose ``.mp3`` is handed back directly; an MP3 packed in a
+    Offline key detection (librosa decode) needs a genuine file path, not bytes.
+    A loose ``.mp3`` is handed back directly; an MP3 packed in a
     ``.zip`` is extracted to a temp file that is deleted on exit. ``base_path``
     is the store's path with any extension; ``file_types`` its recorded types.
 

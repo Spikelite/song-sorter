@@ -1,6 +1,6 @@
 """Tests for the pure core of key_detect: KS correlation, key parsing, fusion.
 
-These deliberately avoid the optional audio stack (librosa/acoustid); they
+These deliberately avoid the optional audio stack (librosa) and the network; they
 exercise only the stdlib-only functions that carry the correctness weight.
 """
 
@@ -243,8 +243,9 @@ def test_detect_key_offline_degrades_without_librosa() -> None:
         assert key_detect.detect_key_offline("does-not-exist.mp3") is None
 
 
-def test_lookup_online_without_api_key_is_noop() -> None:
+def test_lookup_online_empty_query_is_noop() -> None:
+    # Empty artist/title short-circuits before any network call.
     import key_online
-    key, detail = key_online.lookup_online("does-not-exist.mp3", "")
+    key, detail = key_online.lookup_online("", "")
     assert key is None
-    assert "api key" in detail
+    assert detail == "no musicbrainz match"

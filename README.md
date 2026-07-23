@@ -135,7 +135,8 @@ The interactive menu (`python main.py`) operates on a persistent track store
   (`key-overrides.json`) → the MP3's ID3 **`TKEY`** tag → **offline audio
   detection** (librosa chromagram + Krumhansl–Schmuckler correlation over the
   first verse, to dodge final-chorus modulation) → **online corroboration**
-  (AcoustID fingerprint → AcousticBrainz). It **gates hard on confidence** — a
+  (MusicBrainz text search → AcousticBrainz — plain HTTP, no API key or
+  fingerprinting). It **gates hard on confidence** — a
   wrong key is worse than none — so only confident results are written, with a
   `key_confidence` (0–1) and a `key_source` (`manual`/`tag`/`auto`/`online`)
   recorded in metadata and later emitted into `index.json` by **Final-final**.
@@ -145,9 +146,11 @@ The interactive menu (`python main.py`) operates on a persistent track store
   confident one. **Every copy is keyed independently** — alternates exported as
   `versions[]` get their own key, since different brands' rips of one song are
   often in different keys. Incremental and resumable (skips tracks already keyed
-  for the current MP3; re-check option for weak/none results). Fully **offline** except
-  the optional AcoustID/AcousticBrainz step; the audio stack
-  (`requirements-key.txt`) is optional — without it, only tags/overrides apply.
+  for the current MP3; re-check option for weak/none results). Fully **offline**
+  except the optional MusicBrainz/AcousticBrainz corroboration (which needs no
+  extra packages — just internet); the offline audio stack
+  (`requirements-key.txt`) is optional — without it, only tags/overrides (and
+  online corroboration, if enabled) apply.
 - **Unify-artists** — Merge duplicate/variant artist spellings to one canonical
   name using a curated `artist-aliases.json` (`{variant: canonical}`). Prompts
   for a **dry run** first (lists every rename and how many tracks it touches),
@@ -243,12 +246,10 @@ State lives under `.cache/song-sorter/` (git-ignored):
 - **`review-state.json`** — per-track review decisions (e.g. `ok`), kept
   separate from the track data so re-running cleanup never loses review progress.
 - **`config.json`** — remembered settings: the **Final-final** output
-  directory, the **Songbook** name and output path, an optional
+  directory, the **Songbook** name and output path, and an optional
   `"always_review"` list — artist groups (matched on the cleaned name) that
   enter the **Review** queue regardless of size, for garbage buckets that
-  would otherwise outgrow the thin-artist threshold and become invisible — and
-  an optional `"acoustid_api_key"` for **Key-detect**'s online step (or set the
-  `ACOUSTID_API_KEY` environment variable).
+  would otherwise outgrow the thin-artist threshold and become invisible.
 - **`key-overrides.json`** *(optional, hand-curated)* — the source of truth for
   **Key-detect**: `{ "<artist> - <song>": "A minor", … }` (values in any form —
   `"A minor"`, `"Am"`, `"8A"` — matched case-insensitively on the track's
@@ -278,8 +279,11 @@ Python 3 with
 
 ### Optional: Key-detect
 
-**Key-detect** is the only feature with extra dependencies, kept out of the base
-install so the rest of the tool stays lightweight and offline. Install them with:
+**Key-detect**'s *offline* audio detection is the only feature with an extra
+dependency, kept out of the base install so the rest of the tool stays
+lightweight. Its *online* corroboration (MusicBrainz → AcousticBrainz) needs no
+extra packages — it's plain HTTP, just an internet connection. Install the
+offline stack with:
 
 ```text
 pip install -r requirements-key.txt
@@ -289,9 +293,6 @@ pip install -r requirements-key.txt
   Decoding MP3s also needs an audio backend: a modern
   [soundfile](https://python-soundfile.readthedocs.io/)/libsndfile (≥ 1.1), or
   [ffmpeg](https://ffmpeg.org/) on your `PATH`.
-- [pyacoustid](https://github.com/beetbox/pyacoustid) *(online step only)* —
-  needs the [Chromaprint](https://acoustid.org/chromaprint) `fpcalc` binary on
-  your `PATH` and a free [AcoustID API key](https://acoustid.org/new-application).
 
-Without these, **Key-detect** still runs — it just falls back to `TKEY` tags and
-`key-overrides.json` only.
+Without it, **Key-detect** still runs — it just falls back to `TKEY` tags,
+`key-overrides.json`, and (when online) MusicBrainz/AcousticBrainz corroboration.

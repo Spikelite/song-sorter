@@ -1,8 +1,9 @@
-"""Online key corroboration: fingerprint -> AcoustID -> AcousticBrainz.
+"""Online key corroboration: MusicBrainz -> AcousticBrainz.
 
-The *advisory* half of key detection (KriticalDJ #15, v2). It fingerprints the
-audio with Chromaprint (`fpcalc`), resolves the recording's MusicBrainz IDs via
-AcoustID, then asks AcousticBrainz for that recording's estimated key.
+The *advisory* half of key detection (KriticalDJ #15). It resolves a recording
+via MusicBrainz text search -- the same service song-sorter's Musicbrainz step
+already uses, so no audio fingerprinting, no AcoustID, no `fpcalc` binary, and no
+API key -- then reads that recording's estimated key from AcousticBrainz.
 
 Important caveat, enforced by how `combine_key_signals` uses this: AcousticBrainz
 reports the key of the *original commercial master*, not the (often transposed)
@@ -10,11 +11,11 @@ karaoke rip. So this is only ever used to corroborate/boost the offline read, or
 to fill where there is no local signal at all -- never to override a confident
 local result.
 
-Everything here is best-effort and offline-safe: a missing `fpcalc`/`pyacoustid`,
-no API key, or no internet all yield None rather than raising. AcoustID (which
-holds no key data itself) and AcousticBrainz are separate services; AcousticBrainz
-is archived/read-only but still serves data for recordings that were submitted,
-with spotty coverage -- hence we try every candidate MBID until one has a key.
+Everything here is best-effort and offline-safe: no internet, or a recording MB
+can't match, all yield None rather than raising. AcousticBrainz is archived/
+read-only but still serves data for recordings that were submitted, with spotty
+coverage -- hence we try every candidate MBID until one has a key. It's plain
+HTTP/JSON (urllib), so this module has no third-party dependencies.
 """
 
 from __future__ import annotations
@@ -23,24 +24,26 @@ import json
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from key_detect import normalize_key
 
-try:
-    import acoustid  # needs the fpcalc/Chromaprint binary on PATH
-    HAVE_ACOUSTID = True
-except Exception:  # pragma: no cover - exercised only where acoustid is absent
-    HAVE_ACOUSTID = False
-
+_MB_URL = "https://musicbrainz.org/ws/2/recording"
 _AB_URL = "https://acousticbrainz.org/api/v1/{}/low-level"
 _USER_AGENT = "song-sorter/1.0 ( https://github.com/Spikelite/song-sorter )"
 
-# Be a good citizen: AcoustID permits a few requests/sec, AcousticBrainz is a
-# volunteer archive. One shared throttle keeps us well under any limit.
-_MIN_INTERVAL = 0.34
+# MusicBrainz asks for <= 1 request/second; AcousticBrainz is more lenient. One
+# shared >=1s throttle keeps us within MB's limit for both services.
+_MIN_INTERVAL = 1.1
 _throttle_lock = threading.Lock()
 _last_call = 0.0
+
+# How confident MB must be in a text match before we trust the MBID (its search
+# score is 0-100), and how many candidates to try against AcousticBrainz, whose
+# coverage is per-MBID (many recordings 404).
+_MB_MIN_SCORE = 85
+_MAX_CANDIDATES = 5
 
 
 def _throttle() -> None:
@@ -52,36 +55,36 @@ def _throttle() -> None:
         _last_call = time.monotonic()
 
 
-def fingerprint(mp3_path: str) -> tuple[int, bytes] | None:
-    """(duration, chromaprint fingerprint) for an audio file, or None.
-
-    None when pyacoustid/fpcalc isn't available or the file can't be
-    fingerprinted."""
-    if not HAVE_ACOUSTID:
-        return None
-    try:
-        duration, fp = acoustid.fingerprint_file(mp3_path)
-        return int(duration), fp
-    except Exception:
-        return None
+def _mb_escape(s: str) -> str:
+    """Neutralise Lucene quoting -- we wrap the value in a quoted phrase."""
+    return s.replace("\\", " ").replace('"', " ").strip()
 
 
-def _acoustid_mbids(api_key: str, duration: int, fp: bytes) -> list[str]:
-    """Recording MBIDs for a fingerprint, best score first; [] on any failure."""
-    _throttle()
-    try:
-        res = acoustid.lookup(api_key, fp, duration, meta="recordingids")
-    except Exception:
+def _musicbrainz_mbids(artist: str, title: str) -> list[str]:
+    """Candidate recording MBIDs for an artist+title, best match first; [] on
+    any failure or when nothing clears the match-score threshold."""
+    qa, qt = _mb_escape(artist), _mb_escape(title)
+    if not qa or not qt:
         return []
-    if res.get("status") != "ok":
+    q = f'artist:"{qa}" AND recording:"{qt}"'
+    url = _MB_URL + "?" + urllib.parse.urlencode(
+        {"query": q, "fmt": "json", "limit": "10"})
+    _throttle()
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            recordings = json.load(resp).get("recordings", [])
+    except Exception:
         return []
     mbids: list[str] = []
-    for result in sorted(res.get("results", []),
-                         key=lambda r: r.get("score", 0), reverse=True):
-        for rec in result.get("recordings", []):
-            mbid = rec.get("id")
-            if mbid and mbid not in mbids:
-                mbids.append(mbid)
+    for rec in recordings:
+        if rec.get("score", 0) < _MB_MIN_SCORE:
+            continue  # results are score-ordered, so the rest are weaker too
+        mbid = rec.get("id")
+        if mbid and mbid not in mbids:
+            mbids.append(mbid)
+        if len(mbids) >= _MAX_CANDIDATES:
+            break
     return mbids
 
 
@@ -95,9 +98,7 @@ def _acousticbrainz_key(mbid: str) -> str | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.load(resp)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        return None
+        return None if e.code == 404 else None
     except Exception:
         return None
     tonal = data.get("tonal", {})
@@ -108,22 +109,17 @@ def _acousticbrainz_key(mbid: str) -> str | None:
     return normalize_key(f"{key} {scale}")
 
 
-def lookup_online(mp3_path: str, api_key: str,
+def lookup_online(artist: str, title: str,
                   mbid_cache: dict[str, str | None] | None = None) -> tuple[str | None, str]:
-    """Best-effort online key for an audio file.
+    """Best-effort online key for a recording named by artist+title.
 
-    Returns ``(canonical_key_or_None, detail)``. Fingerprints, resolves MBIDs via
-    AcoustID, then tries each MBID against AcousticBrainz until one yields a key.
-    ``mbid_cache`` (optional) memoises AcousticBrainz results across the run."""
-    if not api_key:
-        return None, "no acoustid api key"
-    fp = fingerprint(mp3_path)
-    if fp is None:
-        return None, "fingerprint unavailable"
-    duration, code = fp
-    mbids = _acoustid_mbids(api_key, duration, code)
+    Returns ``(canonical_key_or_None, detail)``. Resolves candidate MBIDs via
+    MusicBrainz text search, then tries each against AcousticBrainz until one
+    yields a key. ``mbid_cache`` (optional) memoises AcousticBrainz results
+    across the run."""
+    mbids = _musicbrainz_mbids(artist, title)
     if not mbids:
-        return None, "no acoustid match"
+        return None, "no musicbrainz match"
     for mbid in mbids:
         if mbid_cache is not None and mbid in mbid_cache:
             key = mbid_cache[mbid]

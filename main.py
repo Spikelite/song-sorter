@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import collections
 import json
-import os
 import re
 import shutil
 import socket
@@ -1522,7 +1521,7 @@ def review_mode(store: TrackStore) -> None:
 
 
 # Offline detection this confident needs no online confirmation -- skip the
-# network call (and spare the AcoustID quota) once we're already sure.
+# (rate-limited MusicBrainz) network call once we're already sure.
 _ONLINE_CORROBORATE_BELOW = 0.85
 
 
@@ -1551,47 +1550,31 @@ def detect_keys(store: TrackStore) -> None:
 
     Precedence: manual override > ID3 TKEY tag > offline audio detection
     (librosa chromagram + Krumhansl-Schmuckler over the first verse) > online
-    corroboration (AcoustID + AcousticBrainz). Online is advisory -- it reports
-    the original master's key, not the transposed rip -- so it only lifts a
-    weak offline read when it agrees, or fills where there's no local signal.
+    corroboration (MusicBrainz text search -> AcousticBrainz). Online is advisory
+    -- it reports the original master's key, not the transposed rip -- so it only
+    lifts a weak offline read when it agrees, or fills where there's no local signal.
 
     Incremental & resumable: a track is skipped when it already carries a key
     computed from the current MP3 (key_sig == mp3_hash), unless you opt to
-    re-check weak/none results. Offline detection needs librosa; online needs
-    fpcalc + a free AcoustID key -- each degrades gracefully when absent."""
-    cfg = _load_config()
-
+    re-check weak/none results. Offline detection needs librosa (optional); the
+    online step needs only internet -- each degrades gracefully when absent."""
     # --- capability + online setup ----------------------------------------
     if not key_detect.HAVE_LIBROSA:
         questionary.print(
             "librosa not installed -- offline audio key detection is unavailable "
             "(install with: pip install -r requirements-key.txt).")
+    # Online corroboration is MusicBrainz text-search -> AcousticBrainz: plain
+    # HTTP, no API key, no fingerprinting -- so it's available whenever we're
+    # online and the user opts in.
     online_enabled = False
-    api_key = ""
-    if key_online.HAVE_ACOUSTID:
-        if _is_online("api.acoustid.org"):
-            api_key = cfg.get("acoustid_api_key", "") or os.environ.get("ACOUSTID_API_KEY", "")
-            if not api_key:
-                questionary.print(
-                    "Online corroboration uses AcoustID + AcousticBrainz. It needs a "
-                    "free AcoustID API key: https://acoustid.org/new-application")
-                ans = questionary.text("AcoustID API key (blank to skip online):").ask()
-                if ans and ans.strip():
-                    api_key = ans.strip()
-                    cfg["acoustid_api_key"] = api_key
-                    _save_config(cfg)
-            online_enabled = bool(api_key)
-        else:
-            questionary.print("AcoustID unreachable -- offline detection only.")
+    if _is_online():
+        online_enabled = questionary.confirm(
+            "Use online corroboration (MusicBrainz -> AcousticBrainz) to confirm/fill "
+            "keys? It reports the original master's key -- advisory only, and never "
+            "overrides a confident local read.",
+            default=True).ask() or False
     else:
-        questionary.print(
-            "pyacoustid/fpcalc not installed -- online corroboration unavailable "
-            "(offline only).")
-    if online_enabled:
-        questionary.print(
-            "Online corroboration ON. Note: AcousticBrainz reports the ORIGINAL "
-            "master's key, which can differ from a transposed karaoke rip; it is "
-            "used only to confirm/fill, never to override a confident local read.")
+        questionary.print("MusicBrainz unreachable -- offline detection only.")
 
     if not key_detect.HAVE_LIBROSA and not online_enabled:
         if not questionary.confirm(
@@ -1650,14 +1633,16 @@ def detect_keys(store: TrackStore) -> None:
                 if mp3_path is not None:
                     tag = read_key_tag(mp3_path)
                     offline = key_detect.detect_key_offline(str(mp3_path))
-                    if online_enabled and (offline is None
-                                           or offline[1] < _ONLINE_CORROBORATE_BELOW):
-                        try:
-                            okey, _detail = key_online.lookup_online(
-                                str(mp3_path), api_key, mbid_cache)
-                            online = okey
-                        except Exception:
-                            online = None
+            # Online is text-based (artist+title), so it runs after the audio
+            # file is released, and only when the local read is weak/absent --
+            # sparing the (rate-limited) MusicBrainz calls.
+            if online_enabled and (offline is None
+                                   or offline[1] < _ONLINE_CORROBORATE_BELOW):
+                try:
+                    online, _detail = key_online.lookup_online(
+                        track.artist, track.song, mbid_cache)
+                except Exception:
+                    online = None
         result = key_detect.combine_key_signals(
             override=ov, tag=tag, offline=offline, online=online)
         _apply_key_result(track, result, sig)
@@ -2800,7 +2785,7 @@ def run_interactive(store: TrackStore) -> None:
         "fuzz_song",
         "exit",
     ]
-    # key-detect can use the network (AcoustID/AcousticBrainz) but degrades to
+    # key-detect can use the network (MusicBrainz/AcousticBrainz) but degrades to
     # fully offline, so it's marked online to flag the optional internet use.
     online = {"musicbrainz", "restitch", "key-detect"}  # need internet, flagged in the menu
 
