@@ -243,6 +243,23 @@ def test_detect_key_offline_degrades_without_librosa() -> None:
         assert key_detect.detect_key_offline("does-not-exist.mp3") is None
 
 
+def test_analyze_local_never_raises_and_is_picklable() -> None:
+    """The worker entry point for the process pool: it must return a result dict
+    for any input (missing file, unreadable zip, optional deps absent) rather
+    than raising, and must be picklable so ProcessPoolExecutor can dispatch it."""
+    import pickle
+    import key_detect
+
+    pickle.dumps(key_detect.analyze_local)  # picklable -> usable in a worker
+
+    for base, types in [("does-not-exist.mp3", ["mp3"]),
+                        ("does-not-exist.zip", ["zip"]),
+                        ("no-audio.cdg", ["cdg"]),
+                        ("", [])]:
+        out = key_detect.analyze_local(base, types)
+        assert out == {"tag": None, "offline": None}
+
+
 def test_lookup_online_empty_query_is_noop() -> None:
     # Empty artist/title short-circuits before any network call.
     import key_online

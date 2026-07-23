@@ -33,11 +33,14 @@ _MB_URL = "https://musicbrainz.org/ws/2/recording"
 _AB_URL = "https://acousticbrainz.org/api/v1/{}/low-level"
 _USER_AGENT = "song-sorter/1.0 ( https://github.com/Spikelite/song-sorter )"
 
-# MusicBrainz asks for <= 1 request/second; AcousticBrainz is more lenient. One
-# shared >=1s throttle keeps us within MB's limit for both services.
-_MIN_INTERVAL = 1.1
+# Throttled per service, not globally: MusicBrainz asks for <= 1 request/second,
+# but AcousticBrainz is a separate host with no such limit. Sharing one 1.1s
+# throttle made a lookup that tried several candidate MBIDs cost seconds of
+# needless waiting -- the dominant per-track cost on a large library.
+_MB_MIN_INTERVAL = 1.1
+_AB_MIN_INTERVAL = 0.34
 _throttle_lock = threading.Lock()
-_last_call = 0.0
+_last_call: dict[str, float] = {}
 
 # How confident MB must be in a text match before we trust the MBID (its search
 # score is 0-100), and how many candidates to try against AcousticBrainz, whose
@@ -46,13 +49,13 @@ _MB_MIN_SCORE = 85
 _MAX_CANDIDATES = 5
 
 
-def _throttle() -> None:
-    global _last_call
+def _throttle(service: str, min_interval: float) -> None:
+    """Rate-limit calls to one service without penalising the other."""
     with _throttle_lock:
-        wait = _MIN_INTERVAL - (time.monotonic() - _last_call)
+        wait = min_interval - (time.monotonic() - _last_call.get(service, 0.0))
         if wait > 0:
             time.sleep(wait)
-        _last_call = time.monotonic()
+        _last_call[service] = time.monotonic()
 
 
 def _mb_escape(s: str) -> str:
@@ -69,7 +72,7 @@ def _musicbrainz_mbids(artist: str, title: str) -> list[str]:
     q = f'artist:"{qa}" AND recording:"{qt}"'
     url = _MB_URL + "?" + urllib.parse.urlencode(
         {"query": q, "fmt": "json", "limit": "10"})
-    _throttle()
+    _throttle("musicbrainz", _MB_MIN_INTERVAL)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -91,7 +94,7 @@ def _musicbrainz_mbids(artist: str, title: str) -> list[str]:
 def _acousticbrainz_key(mbid: str) -> str | None:
     """AcousticBrainz's estimated key for a recording MBID, or None if it holds
     no data (404) / the request fails."""
-    _throttle()
+    _throttle("acousticbrainz", _AB_MIN_INTERVAL)
     req = urllib.request.Request(_AB_URL.format(mbid),
                                  headers={"User-Agent": _USER_AGENT})
     try:

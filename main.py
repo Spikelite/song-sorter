@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import re
 import shutil
 import socket
@@ -11,7 +12,7 @@ import time
 import unicodedata
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
@@ -28,7 +29,7 @@ from track_index import (ArtistIndex, SongIndex, TrackIndex, IndexNode,
                          is_catalog_segment, majority_raw, parse_artist_song,
                          rejoin_artist, safe_folder, split_stem,
                          strip_artist_echo, uncomma_artist)
-from track_inspect import track_details, audio_file, read_key_tag
+from track_inspect import track_details
 from review_state import ReviewState
 import key_detect
 import key_online
@@ -1520,9 +1521,36 @@ def review_mode(store: TrackStore) -> None:
             i += 1
 
 
-# Offline detection this confident needs no online confirmation -- skip the
-# (rate-limited MusicBrainz) network call once we're already sure.
-_ONLINE_CORROBORATE_BELOW = 0.85
+# Only go online when the local read wouldn't publish anything on its own. Above
+# the emit floor we already have a usable key, and the online round-trip costs
+# seconds per track (MusicBrainz is rate-limited to ~1 req/sec) -- far too much
+# to spend on a confidence boost we don't need. Below it, online is the
+# difference between publishing a key and publishing nothing.
+_ONLINE_CORROBORATE_BELOW = key_detect.EMIT_FLOOR
+
+
+def _export_candidates(store: TrackStore, version_limit: int) -> list[Track]:
+    """The copies Final-final would actually export: the best copy per
+    artist+song, plus alternates up to `version_limit`.
+
+    Keying every copy in the store is mostly wasted work -- only exported copies
+    reach index.json, and a karaoke library is heavily duplicated (the same song
+    from a dozen brands). Mirrors tracks_to_keep's grouping and ranking so the
+    two can't disagree about which copies matter."""
+    out: list[Track] = []
+    node_set = [ArtistIndex.from_store(store).get_root()]
+    while node_set:
+        n = node_set.pop()
+        if not n.is_leaf():
+            node_set.extend(n.list_nodes().values())
+            continue
+        ranked = _ranked_tracks(n.list_tracks())  # best-first
+        if not ranked:
+            continue
+        if clean_artist(ranked[0].artist) in ("", "unknown"):
+            continue  # Final-final skips unknown artists, so their keys are moot
+        out.extend(ranked[:max(1, version_limit)])
+    return out
 
 
 def _apply_key_result(track: Track, result: dict, sig: str) -> None:
@@ -1558,6 +1586,8 @@ def detect_keys(store: TrackStore) -> None:
     computed from the current MP3 (key_sig == mp3_hash), unless you opt to
     re-check weak/none results. Offline detection needs librosa (optional); the
     online step needs only internet -- each degrades gracefully when absent."""
+    cfg = _load_config()
+
     # --- capability + online setup ----------------------------------------
     if not key_detect.HAVE_LIBROSA:
         questionary.print(
@@ -1609,48 +1639,129 @@ def detect_keys(store: TrackStore) -> None:
             conf = 0.0
         return src in ("none", "online") or (src == "auto" and conf < key_detect.EMIT_FLOOR)
 
-    todo = [t for t in store.all() if _needs_work(t)]
+    # Scope: only copies Final-final exports actually reach index.json, and a
+    # karaoke library is heavily duplicated -- keying every copy can be several
+    # times the work for no published benefit.
+    version_limit = max(1, int(cfg.get("version_limit", 1) or 1))
+    export_only = questionary.confirm(
+        f"Key only the copies Final-final exports (best + up to {version_limit} "
+        f"per artist+song)? No = key every copy in the store (much slower).",
+        default=True).ask()
+    if export_only is None:
+        return
+    candidates = _export_candidates(store, version_limit) if export_only else store.all()
+
+    todo = [t for t in candidates if _needs_work(t)]
     if not todo:
         questionary.print("No tracks need key detection.")
         return
+    if export_only:
+        questionary.print(
+            f"Scoped to {len(todo):,} exported copies (of {len(store.all()):,} in store).")
     missing_detail = sum(1 for t in todo if not t.metadata.get("mp3_hash"))
     if missing_detail:
         questionary.print(
             f"{missing_detail} track(s) have no mp3_hash -- run Detail first so key "
             "results can be cached/skipped on re-runs.")
 
+    # MusicBrainz allows ~1 request/second, and that ceiling can't be raised with
+    # more workers -- so on a big library the online pass, not the DSP, is what
+    # takes days. Say so up front rather than letting a run discover it at hour 40.
+    if online_enabled and len(todo) > 500:
+        est_hours = len(todo) * 3.2 / 3600.0
+        questionary.print(
+            f"Heads-up: online corroboration costs ~1-3.5s per track it's used on "
+            f"(MusicBrainz is rate-limited to ~1 req/sec and cannot be parallelised) "
+            f"-- on the order of {est_hours:.0f}h if it fires for all {len(todo):,} tracks.")
+        questionary.print(
+            "Faster path for a large library: run offline-only now (parallel, CPU-bound), "
+            "then re-run Key-detect with online + re-check to fill just the gaps.")
+        if not questionary.confirm(
+                "Keep online corroboration on for this run?", default=False).ask():
+            online_enabled = False
+            questionary.print("Online corroboration off for this run.")
+
+    # Offline detection is CPU-bound DSP and dominates the runtime, so fan it out
+    # across processes. Network work stays on this thread (rate-limited, and the
+    # workers keep running while it waits).
+    workers = 1
+    if key_detect.HAVE_LIBROSA:
+        default_workers = min(8, os.cpu_count() or 4)
+        raw = questionary.text(
+            "Parallel workers for offline detection (1 = sequential):",
+            default=str(default_workers)).ask()
+        if raw is None:
+            return
+        try:
+            workers = max(1, int(raw.strip()))
+        except ValueError:
+            workers = default_workers
+
     # --- detect ------------------------------------------------------------
     counts: dict[str, int] = collections.Counter()
     mbid_cache: dict[str, str | None] = {}
+    pair_cache: dict[tuple[str, str], str | None] = {}
     last_save = time.monotonic()
     processed = 0
-    for track in tqdm(todo, desc="Key-detect", unit="track"):
-        sig = track.metadata.get("mp3_hash", "")
-        ov = overrides.get(f"{track.artist} - {track.song}".strip().lower())
-        tag = offline = online = None
-        if ov is None:  # an override needs no file access at all
-            with audio_file(track.path, track.file_types) as mp3_path:
-                if mp3_path is not None:
-                    tag = read_key_tag(mp3_path)
-                    offline = key_detect.detect_key_offline(str(mp3_path))
-            # Online is text-based (artist+title), so it runs after the audio
-            # file is released, and only when the local read is weak/absent --
-            # sparing the (rate-limited) MusicBrainz calls.
-            if online_enabled and (offline is None
-                                   or offline[1] < _ONLINE_CORROBORATE_BELOW):
+
+    def _resolve(track: Track, local: dict) -> dict:
+        """Fuse one track's local signals with (optional) online corroboration."""
+        offline = local.get("offline")
+        online = None
+        if online_enabled and (offline is None
+                               or offline[1] < _ONLINE_CORROBORATE_BELOW):
+            # Duplicated copies share an artist+title, so memoise per pair -- a
+            # MusicBrainz round-trip is ~1s and would otherwise repeat per copy.
+            pk = (track.artist.strip().lower(), track.song.strip().lower())
+            if pk in pair_cache:
+                online = pair_cache[pk]
+            else:
                 try:
                     online, _detail = key_online.lookup_online(
                         track.artist, track.song, mbid_cache)
                 except Exception:
                     online = None
-        result = key_detect.combine_key_signals(
-            override=ov, tag=tag, offline=offline, online=online)
-        _apply_key_result(track, result, sig)
+                pair_cache[pk] = online
+        return key_detect.combine_key_signals(
+            override=None, tag=local.get("tag"), offline=offline, online=online)
+
+    # Overrides need no file access or analysis at all -- settle them up front.
+    analyse: list[Track] = []
+    for track in todo:
+        ov = overrides.get(f"{track.artist} - {track.song}".strip().lower())
+        if ov is None:
+            analyse.append(track)
+            continue
+        result = key_detect.combine_key_signals(override=ov)
+        _apply_key_result(track, result, track.metadata.get("mp3_hash", ""))
+        counts[result["source"]] += 1
+        processed += 1
+
+    def _record(track: Track, local: dict) -> None:
+        nonlocal processed, last_save
+        result = _resolve(track, local)
+        _apply_key_result(track, result, track.metadata.get("mp3_hash", ""))
         counts[result["source"]] += 1
         processed += 1
         if time.monotonic() - last_save >= 300:
             store.save(_CACHE_PATH)
             last_save = time.monotonic()
+
+    if workers > 1 and analyse:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(key_detect.analyze_local, t.path, t.file_types): t
+                       for t in analyse}
+            for fut in tqdm(as_completed(futures), total=len(futures),
+                            desc="Key-detect", unit="track"):
+                track = futures[fut]
+                try:
+                    local = fut.result()
+                except Exception:
+                    local = {"tag": None, "offline": None}
+                _record(track, local)
+    else:
+        for track in tqdm(analyse, desc="Key-detect", unit="track"):
+            _record(track, key_detect.analyze_local(track.path, track.file_types))
 
     store.save(_CACHE_PATH)
     emitted = sum(1 for t in store.all()

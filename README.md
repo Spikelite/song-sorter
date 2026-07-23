@@ -151,6 +151,22 @@ The interactive menu (`python main.py`) operates on a persistent track store
   extra packages — just internet); the offline audio stack
   (`requirements-key.txt`) is optional — without it, only tags/overrides (and
   online corroboration, if enabled) apply.
+
+  **On a large library**, two things keep this from taking days:
+  - By default it only keys the copies **Final-final actually exports** (the best
+    copy per artist+song, plus alternates up to `version_limit`). Keys on the
+    other duplicates would never reach `index.json`, and a karaoke library is
+    heavily duplicated — this alone is usually a several-fold reduction. Answer
+    *no* to the scope prompt to key every copy in the store instead.
+  - Offline detection is CPU-bound, so it runs across **multiple processes**
+    (worker count is prompted; `1` = sequential).
+
+  **Online corroboration does not scale to a whole library**: MusicBrainz allows
+  ~1 request/second, a ceiling no amount of parallelism raises, so it costs
+  ~1–3.5s per track it's used on. Key-detect warns with an estimate before a
+  large run. The fast path is two passes — run **offline-only** first, then
+  re-run with **online + re-check** so the network is spent only on the tracks
+  that came out weak or unkeyed.
 - **Unify-artists** — Merge duplicate/variant artist spellings to one canonical
   name using a curated `artist-aliases.json` (`{variant: canonical}`). Prompts
   for a **dry run** first (lists every rename and how many tracks it touches),
