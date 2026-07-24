@@ -27,8 +27,12 @@ Canonical key spelling uses sharps for the five black keys
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 import re
+import sys
+import warnings
 
 # --- optional heavy dependency, guarded ------------------------------------
 try:
@@ -299,26 +303,106 @@ def key_index_fields(metadata: dict) -> dict:
 _OFFSET_SECONDS = 10.0
 _WINDOW_SECONDS = 45.0
 
+# Peak amplitude below which the analysis window is treated as silence. A silent
+# window has no pitch content: librosa warns ("Trying to estimate tuning from
+# empty frequency set") and any key derived from it is noise, so we return
+# nothing instead -- consistent with "a wrong key is worse than none".
+_SILENCE_FLOOR = 1e-4
+
+# The descriptor C libraries write errors to, irrespective of Python's sys.stderr.
+_STDERR_FD = 2
+
+
+@contextlib.contextmanager
+def _quiet_native_stderr():
+    """Silence C-level stderr for the duration of the block.
+
+    The MP3 decoders under librosa (libmpg123/ffmpeg) write complaints about
+    dodgy ID3 frames -- e.g. "No comment text / valid description?" -- straight
+    to file descriptor 2. That bypasses Python's warnings machinery entirely, so
+    the only way to keep a long batch's progress bar readable is to redirect the
+    fd itself. Karaoke rips have malformed tags constantly; the messages are
+    harmless and per-file, so they'd otherwise drown the output.
+
+    In a worker process this only affects that worker's own fd, leaving the
+    parent's progress bar untouched.
+
+    Note we redirect descriptor 2 itself, not ``sys.stderr.fileno()``: a native
+    library writes to fd 2 whatever ``sys.stderr`` happens to be rebound to, and
+    asking a replaced stderr object for its descriptor can raise or hand back a
+    different fd -- either way leaving the native output unsuppressed."""
+    try:
+        saved = os.dup(_STDERR_FD)
+    except OSError:        # no usable stderr to redirect; nothing to suppress
+        yield
+        return
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        try:
+            sys.stderr.flush()   # don't strand buffered output in devnull
+        except Exception:
+            pass
+        os.dup2(devnull, _STDERR_FD)
+        yield
+    finally:
+        os.dup2(saved, _STDERR_FD)
+        os.close(devnull)
+        os.close(saved)
+
 
 def detect_key_offline(audio_path: str) -> tuple[str, float] | None:
     """Estimate (key, confidence) from a decodable audio file, or None.
 
-    Returns None when librosa isn't installed or the file can't be decoded, so
-    callers degrade gracefully to tag/online signals. Requires an MP3 decode
-    backend (modern soundfile/libsndfile, or audioread + ffmpeg on PATH)."""
+    Returns None when librosa isn't installed, the file can't be decoded, or the
+    analysed window is silent -- so callers degrade gracefully to tag/online
+    signals. Requires an MP3 decode backend (modern soundfile/libsndfile, or
+    audioread + ffmpeg on PATH)."""
     if not HAVE_LIBROSA:
         return None
     try:
-        y, sr = librosa.load(audio_path, mono=True, offset=_OFFSET_SECONDS,
-                             duration=_WINDOW_SECONDS)
-        if y is None or len(y) < sr:  # under a second decoded -> nothing usable
-            # Retry from the very start in case the track is shorter than the offset.
-            y, sr = librosa.load(audio_path, mono=True, duration=_WINDOW_SECONDS)
-        if y is None or len(y) < sr:
-            return None
-        chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-        pcp = [float(v) for v in _np.mean(chroma, axis=1)]
+        with warnings.catch_warnings(), _quiet_native_stderr():
+            # librosa warns per-file on silent/degenerate windows (and the native
+            # decoder complains about malformed ID3 frames); we detect and reject
+            # bad windows ourselves below, so keep the batch output readable.
+            warnings.simplefilter("ignore")
+            y, sr = librosa.load(audio_path, mono=True, offset=_OFFSET_SECONDS,
+                                 duration=_WINDOW_SECONDS)
+            if y is None or len(y) < sr:  # under a second decoded -> nothing usable
+                # Retry from the start in case the track is shorter than the offset.
+                y, sr = librosa.load(audio_path, mono=True, duration=_WINDOW_SECONDS)
+            if y is None or len(y) < sr:
+                return None
+            if float(_np.max(_np.abs(y))) < _SILENCE_FLOOR:
+                return None  # silent window -> no usable pitch content
+            chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+            pcp = [float(v) for v in _np.mean(chroma, axis=1)]
     except Exception:
+        return None
+    if not any(pcp):
         return None
     result = pcp_to_key(pcp)
     return result["key"], result["confidence"]
+
+
+def analyze_local(base_path: str, file_types: list[str]) -> dict:
+    """The local half of key detection for one copy: ID3 TKEY + offline estimate.
+
+    Touches no network and no store, and is importable at module level, so it can
+    run inside a worker process -- offline detection is CPU-bound DSP and is the
+    dominant cost on a large library. Returns
+    ``{"tag": str|None, "offline": (key, confidence)|None}``; never raises."""
+    tag = None
+    offline = None
+    try:
+        # Imported lazily -- and inside the try -- so key_detect stays importable
+        # (and unit-testable) without mutagen / zipfile-deflate64, and so a worker
+        # process can never die on an import it can't satisfy.
+        from track_inspect import audio_file, read_key_tag
+
+        with audio_file(base_path, file_types) as path:
+            if path is not None:
+                tag = read_key_tag(path)
+                offline = detect_key_offline(str(path))
+    except Exception:
+        pass
+    return {"tag": tag, "offline": offline}
