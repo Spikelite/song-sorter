@@ -232,7 +232,13 @@ def split_stem(stem: str) -> list[str]:
     """Filename stem -> ' - '-separated segments, catalog ids dropped
     (leading, trailing, or the trailing id+track-number pair -- disc series
     differ on where they put them)."""
-    parts = [p.strip() for p in stem.split(" - ") if p.strip()]
+    # A trailing ' -' (dangling dash, common on disc rips like '... - Hot -')
+    # isn't a full ' - ' delimiter, so the split leaves it stuck to the last
+    # segment as 'Hot -'. Strip leading/trailing dashes (and spaces) off each
+    # segment so those artifacts don't survive; internal dashes are untouched
+    # ('ZIP-A-DEE-DOO-DAH', 'SFKK-21-00').
+    parts = [s for s in (p.strip().strip("-").strip()
+                         for p in stem.split(" - ")) if s]
     if parts and _STEM_CATALOG_RE.fullmatch(parts[0].replace(" ", "")):
         parts = parts[1:]
     return _trim_trailing_catalog(parts)

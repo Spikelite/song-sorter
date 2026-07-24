@@ -218,6 +218,18 @@ def test_split_stem_drops_catalog_id() -> None:
     assert split_stem("Plain Artist - Plain Song") == ["Plain Artist", "Plain Song"]
 
 
+def test_split_stem_strips_dangling_dashes() -> None:
+    from track_index import split_stem
+    # Trailing dangling dash on the final segment is dropped.
+    assert split_stem("Artist - Song -") == ["Artist", "Song"]
+    # ...and a leading one.
+    assert split_stem("Artist - - Song") == ["Artist", "Song"]
+    # A segment that is only a dash collapses away entirely.
+    assert split_stem("Artist - - - Song") == ["Artist", "Song"]
+    # Dashes INSIDE a segment are content and must be preserved.
+    assert split_stem("AC-DC - T-N-T") == ["AC-DC", "T-N-T"]
+
+
 def test_rejoin_artist_reassembles_split_names() -> None:
     from track_index import rejoin_artist
     known = {"belinda carlisle", "foo fighters"}
