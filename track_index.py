@@ -185,6 +185,18 @@ def _trim_trailing_catalog(parts: list[str]) -> list[str]:
     return parts
 
 
+def _stem_segments(stem: str) -> list[str]:
+    """Split a stem on ' - ' into non-empty segments.
+
+    Drops surrounding space and any dangling leading/trailing dash -- an artifact
+    of stems like '... - Hot -', where the trailing ' -' isn't a full ' - '
+    delimiter and would otherwise stay stuck to the last segment as 'Hot -'.
+    Dashes INSIDE a segment are content and kept ('AC-DC', 'SFKK-21-00',
+    'ZIP-A-DEE-DOO-DAH'); a segment that was only a dash collapses away."""
+    return [s for s in (p.strip().strip("-").strip()
+                        for p in stem.split(" - ")) if s]
+
+
 # Compact catalog stems with no spaces around the dashes, e.g.
 # 'DIS61201-13-MARY POPPINS-I LOVE TO LAUGH' (see parse_artist_song).
 _COMPACT_CATALOG_RE = re.compile(r"^[A-Za-z]{1,6}\d{1,6}-\d{1,3}-(.+)$")
@@ -203,7 +215,7 @@ def parse_artist_song(stem: str) -> tuple[str, str]:
       - 'CATALOG-TRACK-ARTIST-SONG'  (compact, no spaced dashes)
     Returns ('', title) when no artist can be inferred."""
     if " - " in stem:
-        parts = [p.strip() for p in stem.split(" - ") if p.strip()]
+        parts = _stem_segments(stem)
         if parts and not is_catalog_segment(parts[0]):
             trimmed = _trim_trailing_catalog(parts)
             if len(trimmed) != len(parts) and trimmed:
@@ -232,13 +244,7 @@ def split_stem(stem: str) -> list[str]:
     """Filename stem -> ' - '-separated segments, catalog ids dropped
     (leading, trailing, or the trailing id+track-number pair -- disc series
     differ on where they put them)."""
-    # A trailing ' -' (dangling dash, common on disc rips like '... - Hot -')
-    # isn't a full ' - ' delimiter, so the split leaves it stuck to the last
-    # segment as 'Hot -'. Strip leading/trailing dashes (and spaces) off each
-    # segment so those artifacts don't survive; internal dashes are untouched
-    # ('ZIP-A-DEE-DOO-DAH', 'SFKK-21-00').
-    parts = [s for s in (p.strip().strip("-").strip()
-                         for p in stem.split(" - ")) if s]
+    parts = _stem_segments(stem)
     if parts and _STEM_CATALOG_RE.fullmatch(parts[0].replace(" ", "")):
         parts = parts[1:]
     return _trim_trailing_catalog(parts)

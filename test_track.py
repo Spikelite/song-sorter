@@ -299,6 +299,20 @@ def test_parse_catalog_first_unchanged() -> None:
         == ("MARY POPPINS", "I LOVE TO LAUGH")
 
 
+def test_parse_strips_dangling_dashes() -> None:
+    from track_index import parse_artist_song
+    # A trailing dangling dash must not survive on the song (same defect as
+    # split_stem): the song is "Barbara Ann", never "Barbara Ann -". Catalog-first
+    # so the artist is unambiguously preserved (a bare 2-part stem is read as
+    # source-song, which is a separate heuristic).
+    assert parse_artist_song("SC8121-03 - Beach Boys - Barbara Ann -") \
+        == ("Beach Boys", "Barbara Ann")
+    # 2-part form is still de-dashed (source heuristic yields an empty artist).
+    assert parse_artist_song("Beach Boys - Barbara Ann -") == ("", "Barbara Ann")
+    # Internal dashes in artist and title are preserved.
+    assert parse_artist_song("SC8121-03 - AC-DC - T-N-T") == ("AC-DC", "T-N-T")
+
+
 def test_split_stem_drops_trailing_catalog() -> None:
     from track_index import split_stem
     assert split_stem("Lauren Waterworth - Baby Now - SF 193-16") \
