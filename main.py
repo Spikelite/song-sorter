@@ -11,7 +11,6 @@ import socket
 import time
 import unicodedata
 import urllib.parse
-import urllib.request
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
@@ -33,6 +32,7 @@ from track_inspect import track_details
 from review_state import ReviewState
 import key_detect
 import key_online
+import net_retry
 
 
 _CACHE_PATH = Path(__file__).parent / ".cache" / "song-sorter" / "cache.json"
@@ -952,6 +952,38 @@ _MB_URL = "https://musicbrainz.org/ws/2/recording"
 _MB_STRONG = 88   # both sims >= this: confident, low-divergence match -> ok
 _MB_WEAK = 70     # both sims >= this (but not strong): a record exists, diverges -> flag
 
+# Pace outbound MusicBrainz calls to its ~1 req/sec limit. Applied BEFORE every
+# attempt (see _mb_fetch), not after a successful one: the old inline sleep sat
+# after the request, so any failure skipped it entirely and the loop sped up at
+# exactly the moment it should have slowed down -- which is how a brief 503
+# burst used to exhaust the whole failure budget in milliseconds.
+_MB_MIN_INTERVAL = 1.1
+_MB_MAX_STRIKES = 5      # consecutive tracks whose retries were ALL exhausted
+_mb_last_call = 0.0
+
+
+def _mb_throttle() -> None:
+    """Block until at least _MB_MIN_INTERVAL has passed since the last request."""
+    global _mb_last_call
+    wait = _MB_MIN_INTERVAL - (time.monotonic() - _mb_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _mb_last_call = time.monotonic()
+
+
+def _mb_fetch(url: str) -> dict:
+    """One MusicBrainz GET: throttled, retried with exponential backoff, parsed.
+
+    Raises net_retry.PermanentHTTPError (don't bother retrying this query) or
+    net_retry.RetriesExhausted (transient, but it kept failing)."""
+    return net_retry.fetch_json(
+        url,
+        user_agent=_MB_USER_AGENT,
+        before_request=_mb_throttle,
+        on_retry=lambda attempt, delay, err: tqdm.write(
+            f"MusicBrainz: {err} -- retry {attempt} in {delay:.1f}s"),
+    )
+
 
 def _is_online(host: str = "musicbrainz.org", port: int = 443, timeout: float = 3.0) -> bool:
     """Quick reachability probe so online features self-skip when offline."""
@@ -1027,37 +1059,34 @@ def _mb_sim(a: str, b: str) -> float:
 def _mb_search(artist: str, title: str) -> list:
     """Query MusicBrainz for recordings matching artist+title.
 
-    Raises on network error so the caller can handle connectivity loss."""
+    Transient failures are retried with backoff inside _mb_fetch; what reaches
+    the caller is either PermanentHTTPError (this query will never work) or
+    RetriesExhausted (still failing after every attempt)."""
     qa = _mb_escape(_mb_norm(artist, uncomma=True))
     qt = _mb_escape(_mb_norm(title))
     q = f'artist:"{qa}" AND recording:"{qt}"'
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "5"})
-    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.load(resp).get("recordings", [])
+    return _mb_fetch(url).get("recordings", [])
 
 
 def _mb_search_title(title: str) -> list:
     """Search MusicBrainz by title only (for the conservative third pass),
     returning more candidates so the caller can match our artist against their
-    credits. Raises on network error."""
+    credits. Retried with backoff; see _mb_fetch."""
     q = f'recording:"{_mb_escape(_mb_norm(title))}"'
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "20"})
-    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.load(resp).get("recordings", [])
+    return _mb_fetch(url).get("recordings", [])
 
 
 def _mb_search_release(title: str, release: str) -> list:
     """Search MusicBrainz by title + release. For soundtrack tracks whose
     'artist' field is really the album/soundtrack name, a hit identifies the
-    real performer (self-corroborated by the release match). Raises on error."""
+    real performer (self-corroborated by the release match). Retried with
+    backoff; see _mb_fetch."""
     q = (f'recording:"{_mb_escape(_mb_norm(title))}" '
          f'AND release:"{_mb_escape(_mb_norm(release))}"')
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "10"})
-    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.load(resp).get("recordings", [])
+    return _mb_fetch(url).get("recordings", [])
 
 
 def _mb_best(recordings: list, our_artist: str, our_title: str) -> tuple:
@@ -1132,14 +1161,12 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                     na, nt, ma, mt, was_swap, via_title, sug_a, sug_t = pair_cache[key]
                 else:
                     res = _mb_search(a, s)
-                    time.sleep(1.1)  # MusicBrainz: ~1 req/sec
                     na, nt, ma, mt = _mb_best(res, a, s)
                     was_swap = via_title = False
                     sug_a = sug_t = ""
                     if not (na >= _MB_STRONG and nt >= _MB_STRONG):
                         # Try the reversed orientation to catch swapped parses.
                         res2 = _mb_search(s, a)
-                        time.sleep(1.1)
                         sa, st_, sma, smt = _mb_best(res2, s, a)
                         if sa >= _MB_STRONG and st_ >= _MB_STRONG:
                             na, nt, ma, mt, was_swap = sa, st_, sma, smt, True
@@ -1148,7 +1175,6 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                         # if our artist AND title both strongly match a returned
                         # recording (rejects same-title/different-artist noise).
                         res3 = _mb_search_title(s)
-                        time.sleep(1.1)
                         ta, tt, tma, tmt = _mb_best(res3, a, s)
                         if ta >= _MB_STRONG and tt >= _MB_STRONG:
                             na, nt, ma, mt, via_title = ta, tt, tma, tmt, True
@@ -1158,7 +1184,6 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                             # identifies the real performer, corroborated by the
                             # release match. Recorded as a suggestion, never applied.
                             res4 = _mb_search_release(s, a)
-                            time.sleep(1.1)
                             for r in res4:
                                 if _mb_sim(s, r.get("title", "")) >= _MB_STRONG:
                                     sug_a = _mb_credit_name(r.get("artist-credit"))
@@ -1166,12 +1191,22 @@ def musicbrainz_lookup(store: TrackStore) -> None:
                                     break
                     pair_cache[key] = (na, nt, ma, mt, was_swap, via_title, sug_a, sug_t)
                 consecutive_fail = 0
-            except Exception:
+            except net_retry.PermanentHTTPError as e:
+                # Retrying cannot fix this (e.g. HTTP 400 from characters that
+                # break the Lucene query). Skip the track WITHOUT spending a
+                # strike -- a run of unqueryable titles is not an outage.
+                tqdm.write(f"skip  {a!r} - {s!r}: {e}")
+                continue
+            except net_retry.RetriesExhausted as e:
+                # Every backoff attempt failed. Now it counts as a strike.
                 consecutive_fail += 1
-                if consecutive_fail >= 5:
-                    tqdm.write("Lost connection to MusicBrainz -- saving progress and stopping.")
+                if consecutive_fail >= _MB_MAX_STRIKES:
+                    tqdm.write(
+                        f"MusicBrainz still failing after {consecutive_fail} "
+                        f"consecutive tracks ({e}) -- saving progress and "
+                        f"stopping. Re-run later to resume where this left off.")
                     break
-                continue  # transient error: leave un-checked, retry next run
+                continue  # transient: leave un-checked, retry next run
 
             t.metadata["mb_checked"] = "1"
             if na >= _MB_STRONG and nt >= _MB_STRONG:
@@ -1256,9 +1291,7 @@ def _mb_search_restitch(artist: str, words: list[str]) -> list:
     qw = " AND ".join(_mb_escape(w) for w in words)
     q = f'artist:"{qa}" AND recording:({qw})'
     url = _MB_URL + "?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": "25"})
-    req = urllib.request.Request(url, headers={"User-Agent": _MB_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.load(resp).get("recordings", [])
+    return _mb_fetch(url).get("recordings", [])
 
 
 def restitch_titles(store: TrackStore) -> None:
@@ -1331,12 +1364,18 @@ def restitch_titles(store: TrackStore) -> None:
                 continue
             try:
                 res = _mb_search_restitch(artist, words)
-                time.sleep(1.1)
                 consecutive_fail = 0
-            except Exception:
+            except net_retry.PermanentHTTPError as e:
+                # Unqueryable fragments -- skip without counting a strike.
+                tqdm.write(f"skip  {artist!r}: {e}")
+                continue
+            except net_retry.RetriesExhausted as e:
                 consecutive_fail += 1
-                if consecutive_fail >= 5:
-                    tqdm.write("Lost connection to MusicBrainz -- saving and stopping.")
+                if consecutive_fail >= _MB_MAX_STRIKES:
+                    tqdm.write(
+                        f"MusicBrainz still failing after {consecutive_fail} "
+                        f"consecutive tracks ({e}) -- saving and stopping. "
+                        f"Re-run later to resume where this left off.")
                     break
                 continue
 

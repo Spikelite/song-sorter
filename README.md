@@ -110,7 +110,12 @@ The interactive menu (`python main.py`) operates on a persistent track store
   **flagged**; the rest are left as no-match. On a re-run it can **re-check**
   tracks previously scored none/flag/suggest (e.g. after matching improvements).
   **Offline-safe** — skips cleanly without internet, rate-limited,
-  cached/resumable, and never part of an offline batch.
+  cached/resumable, and never part of an offline batch. Transient failures
+  (MusicBrainz answers **503** when busy or rate-limited, plus timeouts and
+  5xx) are **retried with exponential backoff** rather than ending the run; a
+  query that can never succeed (e.g. HTTP 400) skips just that track. The run
+  only saves and stops after 5 consecutive tracks whose retries were all
+  exhausted — a genuine outage — and re-running resumes where it left off.
 - **Restitch** *(online)* — Repair titles from **dash-elided disc filenames**
   (FLY/SFKK style), where the artist is dash-split and the title has
   characters cut out at each dash: `FLY-03-06 - Belinda - Carlisle - Heaven
@@ -120,7 +125,8 @@ The interactive menu (`python main.py`) operates on a persistent track store
   when every fragment fits **in order from the title's start**. A single
   unambiguous hit is applied and marked ok; anything ambiguous becomes an
   mb-suggestion for one-click acceptance in **Review**. Offline-safe,
-  rate-limited, resumable (`restitch` metadata).
+  rate-limited, resumable (`restitch` metadata), and uses the same
+  backoff/retry behaviour as **Musicbrainz** above.
 - **Apply-resolutions** — Apply a curated `resolutions.json` (produced offline,
   e.g. with assistance) that maps track paths to a corrected `artist`/`song`.
   Prompts for a **dry run** first so the entire change set can be reviewed, then

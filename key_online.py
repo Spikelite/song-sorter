@@ -15,18 +15,16 @@ Everything here is best-effort and offline-safe: no internet, or a recording MB
 can't match, all yield None rather than raising. AcousticBrainz is archived/
 read-only but still serves data for recordings that were submitted, with spotty
 coverage -- hence we try every candidate MBID until one has a key. It's plain
-HTTP/JSON (urllib), so this module has no third-party dependencies.
+HTTP/JSON via net_retry, so this module has no third-party dependencies.
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
+import net_retry
 from key_detect import normalize_key
 
 _MB_URL = "https://musicbrainz.org/ws/2/recording"
@@ -72,13 +70,13 @@ def _musicbrainz_mbids(artist: str, title: str) -> list[str]:
     q = f'artist:"{qa}" AND recording:"{qt}"'
     url = _MB_URL + "?" + urllib.parse.urlencode(
         {"query": q, "fmt": "json", "limit": "10"})
-    _throttle("musicbrainz", _MB_MIN_INTERVAL)
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            recordings = json.load(resp).get("recordings", [])
+        recordings = net_retry.fetch_json(
+            url, user_agent=_USER_AGENT, max_attempts=3, max_delay=10.0,
+            before_request=lambda: _throttle("musicbrainz", _MB_MIN_INTERVAL),
+        ).get("recordings", [])
     except Exception:
-        return []
+        return []   # best-effort: backoff already happened inside fetch_json
     mbids: list[str] = []
     for rec in recordings:
         if rec.get("score", 0) < _MB_MIN_SCORE:
@@ -94,15 +92,16 @@ def _musicbrainz_mbids(artist: str, title: str) -> list[str]:
 def _acousticbrainz_key(mbid: str) -> str | None:
     """AcousticBrainz's estimated key for a recording MBID, or None if it holds
     no data (404) / the request fails."""
-    _throttle("acousticbrainz", _AB_MIN_INTERVAL)
-    req = urllib.request.Request(_AB_URL.format(mbid),
-                                 headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.load(resp)
-    except urllib.error.HTTPError as e:
-        return None if e.code == 404 else None
+        data = net_retry.fetch_json(
+            _AB_URL.format(mbid), user_agent=_USER_AGENT,
+            max_attempts=3, max_delay=10.0,
+            before_request=lambda: _throttle("acousticbrainz", _AB_MIN_INTERVAL),
+        )
     except Exception:
+        # Covers the very common 404 -- AcousticBrainz holds no submission for
+        # that recording. net_retry treats 4xx as permanent, so those cost one
+        # request and no backoff, exactly as before.
         return None
     tonal = data.get("tonal", {})
     key = tonal.get("key_key")
