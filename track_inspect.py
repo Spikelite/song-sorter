@@ -6,7 +6,6 @@ import hashlib
 import os
 import tempfile
 from contextlib import contextmanager
-from sys import exc_info
 import zipfile_deflate64 as zipfile   # adds Deflate64 (method 9); supersets stdlib zipfile
 import zlib
 from io import BytesIO
@@ -100,6 +99,7 @@ def _details_from_pair(
     cdg_size: int | None = None,
     cdg_crc: int | None = None,
     mp3_size: int | None = None,
+    mp3_crc_ok: bool = True,
 ) -> dict[str, str]:
     """Build details dict from an MP3 plus a CDG fingerprint.
 
@@ -118,6 +118,11 @@ def _details_from_pair(
         "cdg_hash": format(cdg_crc, "08x") if cdg_crc is not None else "",
         "cdg_size": str(cdg_size if cdg_size is not None else 0),
     }
+    # Only recorded when the salvage path fired, so intact tracks keep exactly
+    # the metadata they had. Without this the checksum result was computed and
+    # then dropped, leaving a corrupt rip indistinguishable from a good one.
+    if not mp3_crc_ok:
+        out["mp3_crc_failed"] = "1"
 
     mp3_info = _mp3_info(mp3_data)
     out.update(mp3_info)
@@ -136,7 +141,8 @@ def track_details(path: str | Path) -> dict[str, str]:
 
     Returns dict with keys: cdg_hash, cdg_size, mp3_hash, mp3_size,
     length_seconds, bitrate_bps, sample_rate_hz, channels.
-    Missing keys indicate unavailable data.
+    Missing keys indicate unavailable data. A zipped MP3 whose CRC-32 did not
+    verify is still kept, but additionally carries mp3_crc_failed="1".
     """
     p = Path(path)
     if not p.exists():
@@ -182,7 +188,7 @@ def track_details(path: str | Path) -> dict[str, str]:
 
                 cdg_member = stems["cdg"]
                 mp3_member = stems["mp3"]
-                mp3_data, mp3_ok = _read_member(zf, mp3_member)
+                mp3_data, mp3_crc_ok = _read_member(zf, mp3_member)
                 # CDG: take size + CRC-32 straight from the zip directory.
                 # No need to read or decompress the CDG member at all.
                 cdg_info = zf.getinfo(cdg_member)
@@ -190,6 +196,7 @@ def track_details(path: str | Path) -> dict[str, str]:
                     mp3_data,
                     cdg_size=cdg_info.file_size,
                     cdg_crc=cdg_info.CRC,
+                    mp3_crc_ok=mp3_crc_ok,
                 )
         except NotImplementedError as e:
             # Unsupported compression method (something even deflate64 can't handle)

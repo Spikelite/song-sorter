@@ -239,10 +239,6 @@ def _format_metadata(metadata: dict[str, str]) -> str:
     
     length = metadata.get("length_seconds", "")
     bitrate = int(int(metadata.get("bitrate_bps", "0"))/1000)
-    # seems like always 44k, and 2 channels
-    sample_hz = metadata.get("sample_rate_hz", "")
-    channels = metadata.get("channels", "")
-
     track_summary = f"sec {length}, bitrate {bitrate}"
 
     mp3_size = int(int(metadata.get("mp3_size", "0"))/1000)
@@ -2013,7 +2009,7 @@ def library_stats(store: TrackStore) -> None:
     L(f"Distinct artists:       {len(artist_songs):,}")
     L(f"Unknown-artist files:   {unknown:,}")
     L(f"Duplicate copies:       {dupes:,}  ({dupes / total:.0%} of files are extra copies)")
-    L(f"Formats:                " + ", ".join(f"{k}={v:,}" for k, v in fmt.most_common()))
+    L("Formats:                " + ", ".join(f"{k}={v:,}" for k, v in fmt.most_common()))
     L("")
     L(f"Detailed (have MP3 info): {detailed:,} / {total:,}")
     L(f"Total audio:            {hrs(total_seconds)}")
@@ -2026,7 +2022,7 @@ def library_stats(store: TrackStore) -> None:
     L("Top 15 artists by distinct songs:")
     top_artists = sorted(artist_songs, key=lambda k: -len(artist_songs[k]))[:15]
     for i, ca in enumerate(top_artists, 1):
-        L(f"  {i:>2}. {name(artist_display[ca])}  —  {len(artist_songs[ca]):,}")
+        L(f"  {i:>2}. {name(artist_display[ca])}  ({len(artist_songs[ca]):,})")
     L("")
     L("Most-duplicated songs (copies in library):")
     for (key, n) in pair_copies.most_common(10):
@@ -2774,8 +2770,10 @@ def fuzz_artist(store: TrackStore) -> None:
                     this_count = anode.count()
                     other_count = letter_nodes[other_artist].count()
 
-                    # break ties consistently. hash?
-                    if this_count < other_count or (this_count == other_count and hash(anode) < hash(letter_nodes[other_artist])):
+                    # Tie-break on the node KEY, not hash(node): IndexNode has no
+                    # __hash__, so that was identity/address based and differed every
+                    # run, letting two Fuzz passes merge a pair opposite ways.
+                    if this_count < other_count or (this_count == other_count and artist < other_artist):
                         # display the winner's majority RAW spelling -- the
                         # node key is the lowercased clean form and writing it
                         # back is how lowercase display relics were born
@@ -2809,8 +2807,9 @@ def fuzz_song(store: TrackStore) -> None:
                         this_count = snode.count()
                         other_count = song_nodes[other_song].count()
 
-                        # break ties consistently. hash?
-                        if this_count < other_count or (this_count == other_count and hash(snode) < hash(song_nodes[other_song])):
+                        # Tie-break on the node KEY (see fuzz_artist): hash(node) was
+                        # identity-based and made merges non-deterministic.
+                        if this_count < other_count or (this_count == other_count and song < other_song):
                             # write the winner's majority RAW title, never the
                             # clean key (lowercased, apostrophes stripped,
                             # in'->ing rewritten -- a display-name destroyer)

@@ -62,12 +62,23 @@ class TrackIndex:
 def clean_artist(artist: str) -> str:
     art = artist.lower()
     art = art.replace("_", " ")
+    # Normalise whitespace BEFORE the credit patterns below, which match
+    # literal single spaces: a double space or a non-breaking space used to
+    # hide ' feat ' from them. Doing it first also keeps this function
+    # idempotent, which the cleanup chain relies on -- collapsing afterwards
+    # meant a second pass could find a ' feat ' the first pass had just
+    # created, renaming the same artist again on every run.
+    art = re.sub(r"\s+", " ", art).strip()
     like_and = [" with ", " and ", " + ", " feat. ", " f. ", " ft. ", " ft ", " featuring ", " feat "]
     for n in like_and:
         art = art.replace(n, " & ")
     art = art.replace("'", "")
     art = art.replace(".", " ")
-    art = art.replace("  ", " ")
+    # '.' -> ' ' can re-introduce runs, and a single str.replace("  ", " ")
+    # only halves them ('a    b' -> 'a  b'), so one artist could yield two
+    # different clean keys and split into two groups. Strip before the
+    # article trim too: a leading space stopped 'the ' being removed.
+    art = re.sub(r"\s+", " ", art).strip()
     art = art.removeprefix("the ")
     art = art.removesuffix(", the")
     art = art.strip()
@@ -339,7 +350,10 @@ def clean_song(song: str) -> str:
     song = song.replace("-", "")
     song = song.replace(".", "")
     song = song.replace("&", "and")
-    song = song.replace("in' ", "ing ")
+    # Match a title-final "in'" as well as a mid-title one: keyed on a
+    # trailing space, "Talkin' Loud" normalised but "Loud Talkin'" did not, so
+    # two rips of one song landed in different groups and exported twice.
+    song = re.sub(r"in'(?![a-z])", "ing", song)
     song = song.replace("(duet)", "")
     song = song.replace("(solo)", "")
     song = song.replace("(gospel)", "")

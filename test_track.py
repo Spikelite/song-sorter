@@ -1,6 +1,5 @@
 """Tests for Track and TrackStore."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -167,7 +166,7 @@ def test_majority_raw_prefers_most_common_spelling() -> None:
 def test_safe_folder_flattens_path_hostile_characters() -> None:
     from track_index import safe_folder
     assert safe_folder("ac/dc") == "ac-dc"
-    assert safe_folder("back\slash") == "back-slash"
+    assert safe_folder(r"back\slash") == "back-slash"
     assert safe_folder('a:b*c?d"e<f>g|h') == "a-b-c-d-e-f-g-h"
     assert safe_folder("plain name") == "plain name"
     assert safe_folder("///") == "---"
@@ -216,6 +215,71 @@ def test_split_stem_drops_catalog_id() -> None:
     assert split_stem("SFKK-21-00 - AVRIL - Lavigne - Hot -") \
         == ["AVRIL", "Lavigne", "Hot"]
     assert split_stem("Plain Artist - Plain Song") == ["Plain Artist", "Plain Song"]
+
+
+def test_clean_artist_collapses_any_run_of_spaces() -> None:
+    """A single str.replace pass only halves a run of spaces, so 3+ spaces
+    survived and split one artist into two grouping keys (#20)."""
+    from track_index import clean_artist
+    base = clean_artist("Earth, Wind & Fire")
+    for spaced in ("Earth,  Wind & Fire", "Earth,   Wind & Fire",
+                   "Earth,    Wind & Fire", "Earth,	Wind & Fire"):
+        assert clean_artist(spaced) == base, spaced
+
+
+def test_clean_artist_is_idempotent() -> None:
+    """The cleanup chain re-runs, and Final-final renames folders from these
+    keys, so a non-fixed-point would rename the same artist on every run.
+
+    This caught a real ordering bug: collapsing whitespace AFTER the credit
+    patterns meant a non-breaking space hid ' feat ' from pass 1, which pass 2
+    then found and rewrote."""
+    from track_index import clean_artist
+    samples = [
+        "Avicii Feat  Aloe Blacc",     # non-breaking spaces
+        "Brooke Hogan  Paul Wall",              # double space
+        "Earth,   Wind & Fire",
+        "  The Beatles  ",
+        "Sammy Davis Jr.",
+        "AC/DC",
+        "R.E.M.",
+        "",
+    ]
+    for raw in samples:
+        once = clean_artist(raw)
+        assert clean_artist(once) == once, f"not a fixed point: {raw!r} -> {once!r}"
+
+
+def test_clean_artist_sees_credits_through_odd_whitespace() -> None:
+    """' feat ' matching is literal, so it must run on normalised spacing."""
+    from track_index import clean_artist
+    assert clean_artist("Avicii Feat  Aloe Blacc") == "avicii & aloe blacc"
+    assert clean_artist("Avicii  Feat  Aloe Blacc") == "avicii & aloe blacc"
+    assert clean_artist("Avicii Feat Aloe Blacc") == "avicii & aloe blacc"
+
+
+def test_clean_artist_strips_before_trimming_article() -> None:
+    """Leading whitespace used to defeat removeprefix('the '), yielding
+    'the beatles' where 'beatles' was meant (#20)."""
+    from track_index import clean_artist
+    assert clean_artist("  The Beatles") == clean_artist("The Beatles") == "beatles"
+
+
+def test_clean_song_normalises_title_final_contraction() -> None:
+    """Keyed on a trailing space, so a title-ENDING \"in'\" stayed unnormalised
+    and two rips of one song landed in different groups (#21)."""
+    from track_index import clean_song
+    assert clean_song("Loud Talkin'") == clean_song("Loud Talking")
+    assert clean_song("Talkin' Loud") == clean_song("Talking Loud")   # still holds
+    assert clean_song("Somethin'") == clean_song("Something")
+    assert clean_song("Rockin' (Live)") == clean_song("Rocking (Live)")
+
+
+def test_clean_song_leaves_real_words_alone() -> None:
+    """The contraction rule must not fire mid-word."""
+    from track_index import clean_song
+    assert "ing" not in clean_song("Inside")
+    assert clean_song("Inside") == "inside"
 
 
 def test_split_stem_strips_dangling_dashes() -> None:

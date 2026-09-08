@@ -10,7 +10,6 @@ import urllib.error
 
 import pytest
 
-import net_retry
 from net_retry import (
     PermanentHTTPError,
     RetriesExhausted,
