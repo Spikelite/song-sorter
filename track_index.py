@@ -67,7 +67,12 @@ def clean_artist(artist: str) -> str:
         art = art.replace(n, " & ")
     art = art.replace("'", "")
     art = art.replace(".", " ")
-    art = art.replace("  ", " ")
+    # One str.replace pass only halves a run of spaces ('a    b' -> 'a  b'),
+    # and the '.' -> ' ' substitution above manufactures such runs, so an
+    # artist could yield two different clean keys and split into two groups.
+    # Strip before the article trim too: a leading space used to stop
+    # 'the ' being removed, giving 'the beatles' where 'beatles' was meant.
+    art = re.sub(r"\s+", " ", art).strip()
     art = art.removeprefix("the ")
     art = art.removesuffix(", the")
     art = art.strip()
@@ -339,7 +344,10 @@ def clean_song(song: str) -> str:
     song = song.replace("-", "")
     song = song.replace(".", "")
     song = song.replace("&", "and")
-    song = song.replace("in' ", "ing ")
+    # Match a title-final "in'" as well as a mid-title one: keyed on a
+    # trailing space, "Talkin' Loud" normalised but "Loud Talkin'" did not, so
+    # two rips of one song landed in different groups and exported twice.
+    song = re.sub(r"in'(?![a-z])", "ing", song)
     song = song.replace("(duet)", "")
     song = song.replace("(solo)", "")
     song = song.replace("(gospel)", "")

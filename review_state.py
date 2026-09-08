@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
@@ -36,12 +37,20 @@ class ReviewState:
         self._by_path = dict(data.get("by_path", {}))
 
     def save(self, path: str | Path) -> None:
-        """Write state to disk."""
+        """Write state to disk atomically (temp file + rename).
+
+        Same protection TrackStore.save has, and for a stronger reason: this
+        file holds manual review decisions, which cannot be recomputed from the
+        media. It is rewritten every 60s during a Musicbrainz run and after
+        nearly every keystroke in Review, so an interrupt during a plain write
+        would truncate it and lose the lot."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": self._VERSION,
             "by_path": self._by_path,
         }
-        with open(p, "w", encoding="utf-8") as f:
+        tmp = p.parent / (p.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        os.replace(tmp, p)
