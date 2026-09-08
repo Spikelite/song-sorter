@@ -62,16 +62,22 @@ class TrackIndex:
 def clean_artist(artist: str) -> str:
     art = artist.lower()
     art = art.replace("_", " ")
+    # Normalise whitespace BEFORE the credit patterns below, which match
+    # literal single spaces: a double space or a non-breaking space used to
+    # hide ' feat ' from them. Doing it first also keeps this function
+    # idempotent, which the cleanup chain relies on -- collapsing afterwards
+    # meant a second pass could find a ' feat ' the first pass had just
+    # created, renaming the same artist again on every run.
+    art = re.sub(r"\s+", " ", art).strip()
     like_and = [" with ", " and ", " + ", " feat. ", " f. ", " ft. ", " ft ", " featuring ", " feat "]
     for n in like_and:
         art = art.replace(n, " & ")
     art = art.replace("'", "")
     art = art.replace(".", " ")
-    # One str.replace pass only halves a run of spaces ('a    b' -> 'a  b'),
-    # and the '.' -> ' ' substitution above manufactures such runs, so an
-    # artist could yield two different clean keys and split into two groups.
-    # Strip before the article trim too: a leading space used to stop
-    # 'the ' being removed, giving 'the beatles' where 'beatles' was meant.
+    # '.' -> ' ' can re-introduce runs, and a single str.replace("  ", " ")
+    # only halves them ('a    b' -> 'a  b'), so one artist could yield two
+    # different clean keys and split into two groups. Strip before the
+    # article trim too: a leading space stopped 'the ' being removed.
     art = re.sub(r"\s+", " ", art).strip()
     art = art.removeprefix("the ")
     art = art.removesuffix(", the")

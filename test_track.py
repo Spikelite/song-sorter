@@ -227,6 +227,37 @@ def test_clean_artist_collapses_any_run_of_spaces() -> None:
         assert clean_artist(spaced) == base, spaced
 
 
+def test_clean_artist_is_idempotent() -> None:
+    """The cleanup chain re-runs, and Final-final renames folders from these
+    keys, so a non-fixed-point would rename the same artist on every run.
+
+    This caught a real ordering bug: collapsing whitespace AFTER the credit
+    patterns meant a non-breaking space hid ' feat ' from pass 1, which pass 2
+    then found and rewrote."""
+    from track_index import clean_artist
+    samples = [
+        "Avicii Feat  Aloe Blacc",     # non-breaking spaces
+        "Brooke Hogan  Paul Wall",              # double space
+        "Earth,   Wind & Fire",
+        "  The Beatles  ",
+        "Sammy Davis Jr.",
+        "AC/DC",
+        "R.E.M.",
+        "",
+    ]
+    for raw in samples:
+        once = clean_artist(raw)
+        assert clean_artist(once) == once, f"not a fixed point: {raw!r} -> {once!r}"
+
+
+def test_clean_artist_sees_credits_through_odd_whitespace() -> None:
+    """' feat ' matching is literal, so it must run on normalised spacing."""
+    from track_index import clean_artist
+    assert clean_artist("Avicii Feat  Aloe Blacc") == "avicii & aloe blacc"
+    assert clean_artist("Avicii  Feat  Aloe Blacc") == "avicii & aloe blacc"
+    assert clean_artist("Avicii Feat Aloe Blacc") == "avicii & aloe blacc"
+
+
 def test_clean_artist_strips_before_trimming_article() -> None:
     """Leading whitespace used to defeat removeprefix('the '), yielding
     'the beatles' where 'beatles' was meant (#20)."""
