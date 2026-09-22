@@ -189,8 +189,8 @@ The interactive menu (`python main.py`) operates on a persistent track store
   against known artists.
 
 ### Automated cleanup
-- **All-clean** — Run the full cleanup chain in sequence: Clean → Tag-fill →
-  Uncomma → Ungroup → Fuzz → Fuzz_song.
+- **All-clean** — Run the full cleanup chain in sequence: Clean → Trailing-article →
+  Tag-fill → Uncomma → Ungroup → Fuzz → Fuzz_song.
 - **Clean** — Strip common karaoke descriptors (e.g. `wvocal`, `(Wobgv)`,
   `(Instrumental)`, `(Duet)`) and `[SC Karaoke]`-style **brand tags** from
   artist/song fields (descriptor parentheticals are matched
@@ -281,12 +281,59 @@ Delete `cache.json` to force a full rebuild (re-run **Search** then **Detail**).
 
 ## Development
 
-Run the tests with [pytest](https://pytest.org):
+Install the development tools (tests, coverage, lint) on top of the runtime
+dependencies, then run the suite:
 
 ```text
-pip install pytest
+pip install -r requirements-dev.txt
 pytest
 ```
+
+The suite runs fully offline. Every test blocks real network access (see
+`conftest.py`), and MusicBrainz, AcousticBrainz and librosa are replaced by
+fakes at their module seams. Menus are exercised by scripting questionary's
+answers, so the interactive flows are tested as well as the helpers.
+
+`main.py` and `track_inspect.py` depend on `zipfile-deflate64`, which builds
+from source and needs a C compiler. Where it can't be installed (for example a
+Windows box without Visual C++ Build Tools) the tests that need those modules
+**skip** rather than fail, each naming the missing dependency, and the rest of
+the suite still runs. To run everything on such a machine, use the image CI
+uses:
+
+```text
+docker run --rm -v "$PWD:/src" -w /src python:3.14 sh -c "pip install -q -r requirements-dev.txt && pytest"
+```
+
+Coverage report:
+
+```text
+pytest --cov --cov-report=term-missing
+```
+
+### CI
+
+GitHub Actions runs on every push to `main` and on every pull request
+(`.github/workflows/ci.yml`), in the official `python` container images:
+
+- **Python 3.9**, the production runtime: lint plus the full suite.
+- **Python 3.14**: lint, the full suite, and a **coverage gate at 100%**. The
+  gate runs here because Python 3.10+ traces lines accurately, whereas 3.9's
+  optimiser folds some `continue` lines away and reports them as missed.
+
+The coverage floor is a ratchet, set to what the suite actually achieves, so
+new code needs tests to merge. A genuinely untestable line is excluded with
+`# pragma: no cover` plus a reason, which keeps every exclusion visible and
+reviewable.
+
+### Known bugs are pinned, not hidden
+
+A bug found while writing tests is filed as a GitHub issue and pinned by a test
+asserting the **correct** behaviour, marked
+`@pytest.mark.xfail(strict=True, reason="GH #NN: ...")`. The suite stays green
+while the bug is open. Because the marker is strict, fixing the bug makes that
+test pass unexpectedly and turn the build red, which prompts whoever fixed it to
+remove the marker.
 
 `test_docs.py` guards against documentation drift: it fails if a menu option in
 `main.py` is missing from the **Main Menu Options** reference above.

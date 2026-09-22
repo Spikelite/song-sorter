@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    # The official images: full (not -slim) so zipfile-deflate64 has a compiler
+    # to build with. Using the same images for local verification keeps CI and
+    # a developer's results from drifting apart.
+    container: python:${{ matrix.python }}
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_ROOT_USER_ACTION: ignore
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Production runtime (the NAS). Full suite, for correctness.
+          - python: "3.9"
+            coverage: false
+          # Current Python. Full suite plus the coverage gate. The gate runs
+          # here because 3.10+ traces lines accurately; 3.9's optimiser folds
+          # some `continue` lines away and under-reports them as missed.
+          - python: "3.14"
+            coverage: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache pip downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.python }}-${{ hashFiles('requirements*.txt') }}
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: python -m pyflakes *.py
+
+      - name: Test
+        if: ${{ !matrix.coverage }}
+        run: python -m pytest -q
+
+      - name: Test with coverage gate
+        if: ${{ matrix.coverage }}
+        # A ratchet: the floor is what the suite actually achieves. Raise it if
+        # coverage grows; never lower it without meaning to.
+        run: python -m pytest -q --cov --cov-report=term-missing --cov-fail-under=100
