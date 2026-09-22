@@ -3,6 +3,8 @@
 No network and no real sleeping -- the opener and sleep are injected.
 """
 
+from __future__ import annotations
+
 import email.message
 import io
 import json
@@ -76,6 +78,16 @@ def test_backoff_jitter_stays_in_band() -> None:
     for _ in range(50):
         d = backoff_delay(3, base=2, cap=60)      # nominal 8s, +/-25%
         assert 6.0 <= d <= 10.0
+
+
+def test_retry_after_when_error_has_no_headers() -> None:
+    """An HTTPError built without headers must not crash the backoff path."""
+    err = urllib.error.HTTPError("http://x", 503, "boom", None, None)
+    assert retry_after_seconds(err) is None
+
+
+def test_retry_after_negative_is_rejected() -> None:
+    assert retry_after_seconds(_http_error(503, "-5")) is None
 
 
 def test_retry_after_parsing() -> None:
