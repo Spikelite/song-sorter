@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -139,6 +140,25 @@ def test_rerun_is_incremental_and_counts_missing_sources(m, store, prompts, tmp_
     _export(m, prompts, out)
     m.tracks_to_keep(store)
     assert "copied 0, skipped 1 unchanged, 1 source file(s) missing" in prompts.output
+
+
+def test_a_same_size_source_change_is_recopied(m, store, prompts, tmp_path) -> None:
+    """GH #39: size alone kept the old audio when a destination came to map
+    to a different file of the same size."""
+    t = _src(tmp_path, "SC/Abba - Waterloo.zip", b"old audio")
+    store.add(t)
+    out = tmp_path / "out"
+    _export(m, prompts, out)
+    m.tracks_to_keep(store)
+    src = Path(t.path)
+    src.write_bytes(b"new audio")                          # same size, new content
+    st = src.stat()
+    os.utime(src, (st.st_atime, st.st_mtime + 60))
+    prompts.printed.clear()
+    _export(m, prompts, out)
+    m.tracks_to_keep(store)
+    assert "copied 1, skipped 0" in prompts.output
+    assert (out / "a/abba/Abba - Waterloo.zip").read_bytes() == b"new audio"
 
 
 def test_versions_are_exported_with_labels_and_their_own_keys(m, store, prompts, tmp_path) -> None:

@@ -240,7 +240,8 @@ The interactive menu (`python main.py`) operates on a persistent track store
   are kept apart: the one later by source path gets ` (<source folder>)`
   added to its name, and every other file keeps its own.
   The output directory is prompted and **remembered** between runs. Re-running
-  is safe and incremental — files already present and unchanged are skipped —
+  is safe and incremental — files already present and unchanged (same size and
+  modification time) are skipped —
   and it can optionally **prune** stale files left by earlier runs (e.g. after
   an artist was renamed), touching only its own `<prefix>/<artist>/<file>` layout.
   Also refreshes a `songbook.html` in the output root (see **Songbook**) and
