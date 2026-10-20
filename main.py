@@ -50,9 +50,10 @@ def _load_config() -> dict:
         return {}
     try:
         with open(p, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (ValueError, OSError):
         return {}
+    return data if isinstance(data, dict) else {}  # wrong shape == invalid
 
 
 def _save_config(cfg: dict) -> None:
@@ -63,16 +64,33 @@ def _save_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+def _saved_version_limit(cfg: dict) -> int:
+    """The remembered copies-per-song limit for Final-final's export (which
+    Key-detect mirrors), at least 1. Shared so both read it the same way: a
+    missing or non-numeric value (a hand-edited config.json) falls back to 1."""
+    try:
+        return max(1, int(cfg.get("version_limit", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _load_aliases() -> dict:
     """The artist alias map (variant -> canonical) from artist-aliases.json;
     {} when the file is absent or unreadable. Shared by Unify, Uncomma, and
-    Search so a curated rename is enforced everywhere new names can enter."""
+    Search so a curated rename is enforced everywhere new names can enter.
+
+    A file of the wrong shape (not ``{"aliases": {...}}``) counts as
+    unreadable; an entry whose canonical name is not a string is dropped like
+    a blank one."""
     try:
         with open(_ARTIST_ALIASES_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (ValueError, OSError):
         return {}
-    return {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
+    src = data.get("aliases", {}) if isinstance(data, dict) else {}
+    if not isinstance(src, dict):
+        return {}
+    return {k: v for k, v in src.items() if v and isinstance(v, str) and k != v}
 
 
 def _load_key_overrides() -> dict:
@@ -80,14 +98,19 @@ def _load_key_overrides() -> dict:
 
     key-overrides.json maps ``"<artist> - <song>"`` (matched case-insensitively
     on the track's current fields) to a key string in any form normalize_key
-    accepts (``"A minor"``, ``"Am"``, ``"8A"``...). {} when absent/unreadable."""
+    accepts (``"A minor"``, ``"Am"``, ``"8A"``...). {} when absent/unreadable,
+    or when the map is not an object; an entry whose value is not a string is
+    dropped like a blank one."""
     try:
         with open(_KEY_OVERRIDES_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (ValueError, OSError):
         return {}
     src = data.get("overrides", data) if isinstance(data, dict) else {}
-    return {str(k).strip().lower(): v for k, v in src.items() if v}
+    if not isinstance(src, dict):
+        return {}
+    return {str(k).strip().lower(): v for k, v in src.items()
+            if v and isinstance(v, str)}
 
 
 def _default_scan_dir(store: TrackStore) -> str:
@@ -235,14 +258,23 @@ def add_details(store: TrackStore, root: Path, workers: int = 4,
     store.save(_CACHE_PATH)  # final checkpoint once detailing completes
     print(f"\nAdded {added} track(s), skipped {skipped} unchanged.")
 
+def _int(v) -> int:
+    """A numeric metadata value as an int (floats truncate); a missing, blank
+    or junk value (a hand-edited cache, say) counts as 0 rather than raising."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _format_metadata(metadata: dict[str, str]) -> str:
     
     length = metadata.get("length_seconds", "")
-    bitrate = int(int(metadata.get("bitrate_bps", "0"))/1000)
+    bitrate = int(_int(metadata.get("bitrate_bps", "0"))/1000)
     track_summary = f"sec {length}, bitrate {bitrate}"
 
-    mp3_size = int(int(metadata.get("mp3_size", "0"))/1000)
-    cdg_size = int(int(metadata.get("cdg_size", "0"))/1000)
+    mp3_size = int(_int(metadata.get("mp3_size", "0"))/1000)
+    cdg_size = int(_int(metadata.get("cdg_size", "0"))/1000)
     mp3_hash = metadata.get("mp3_hash", "")[:6]
     cdg_hash = metadata.get("cdg_hash", "")[:6]
 
@@ -282,6 +314,7 @@ def refresh_names(store: TrackStore, root: Path) -> None:
                     if track is not None and track.artist.lower() in ("unknown", ""):
                         track.artist = ca
                         track.song = cs
+                        possible += 1
                         added += 1
                         continue
                 print(f"Skip unexpected: {stem}")
@@ -744,6 +777,7 @@ def fix_unknown(store: TrackStore) -> None:
                     space_split += 1
             else:
                 print(f"Complex space: {song}")
+                complex_split += 1
         elif ',' in song:
             split = [s.strip() for s in song.split(',')]
             if len(split) == 2:
@@ -772,7 +806,7 @@ def fix_unknown(store: TrackStore) -> None:
                 print(f"candidate: '{split[-1]}' - '{' '.join(split[:-1])}'  [{song}]")
             no_split += 1
 
-    questionary.print(f"Success {success}, simple {simple_split}, id {id_split}, Complex {complex_split}, Comma {comma_split}. No Split {no_split}")
+    questionary.print(f"Success {success}, simple {simple_split}, id {id_split}, Complex {complex_split}, Comma {comma_split}, Space {space_split}. No Split {no_split}")
 
 def _tracks_to_review(store: TrackStore, review_state: ReviewState) -> list[Track]:
     """ Part of manual track review - build a list of unreviewed tracks.
@@ -1637,7 +1671,9 @@ def detect_keys(store: TrackStore) -> None:
             "Use online corroboration (MusicBrainz -> AcousticBrainz) to confirm/fill "
             "keys? It reports the original master's key -- advisory only, and never "
             "overrides a confident local read.",
-            default=True).ask() or False
+            default=True).ask()
+        if online_enabled is None:
+            return
     else:
         questionary.print("MusicBrainz unreachable -- offline detection only.")
 
@@ -1650,6 +1686,8 @@ def detect_keys(store: TrackStore) -> None:
     recheck = questionary.confirm(
         "Re-check tracks previously scored none/online/low-confidence?",
         default=False).ask()
+    if recheck is None:
+        return
 
     overrides = _load_key_overrides()
 
@@ -1677,7 +1715,7 @@ def detect_keys(store: TrackStore) -> None:
     # Scope: only copies Final-final exports actually reach index.json, and a
     # karaoke library is heavily duplicated -- keying every copy can be several
     # times the work for no published benefit.
-    version_limit = max(1, int(cfg.get("version_limit", 1) or 1))
+    version_limit = _saved_version_limit(cfg)
     export_only = questionary.confirm(
         f"Key only the copies Final-final exports (best + up to {version_limit} "
         f"per artist+song)? No = key every copy in the store (much slower).",
@@ -1711,8 +1749,11 @@ def detect_keys(store: TrackStore) -> None:
         questionary.print(
             "Faster path for a large library: run offline-only now (parallel, CPU-bound), "
             "then re-run Key-detect with online + re-check to fill just the gaps.")
-        if not questionary.confirm(
-                "Keep online corroboration on for this run?", default=False).ask():
+        keep_online = questionary.confirm(
+            "Keep online corroboration on for this run?", default=False).ask()
+        if keep_online is None:
+            return
+        if not keep_online:
             online_enabled = False
             questionary.print("Online corroboration off for this run.")
 
@@ -1818,7 +1859,8 @@ def apply_resolutions(store: TrackStore) -> None:
     For each path present in the store it sets the artist/song and marks the
     track reviewed ('ok'), recording provenance in metadata ('artist_from' =
     'resolutions'). Entries missing 'artist'/'song' leave that field unchanged.
-    Paths not in the store are skipped and counted. Prompts for a dry run first
+    Paths not in the store are skipped and counted; an entry that is not an
+    object is reported and skipped. Prompts for a dry run first
     so the whole change set can be eyeballed before anything is written."""
     p = Path(_RESOLUTIONS_PATH)
     if not p.exists():
@@ -1830,7 +1872,11 @@ def apply_resolutions(store: TrackStore) -> None:
     except (ValueError, OSError) as exc:
         questionary.print(f"Could not read resolutions: {exc}")
         return
-    res = data.get("resolutions", {})
+    res = data.get("resolutions", {}) if isinstance(data, dict) else None
+    if not isinstance(res, dict):
+        questionary.print(
+            'Could not read resolutions: expected {"resolutions": {"<track path>": {...}}}.')
+        return
     if not res:
         questionary.print("Resolutions file has no entries.")
         return
@@ -1847,6 +1893,9 @@ def apply_resolutions(store: TrackStore) -> None:
 
     applied = missing = unchanged = 0
     for path, r in res.items():
+        if not isinstance(r, dict):
+            questionary.print(f"Skipping malformed entry (not an object): {path}")
+            continue
         track = store.get(path)
         if track is None:
             missing += 1
@@ -1952,12 +2001,6 @@ def library_stats(store: TrackStore) -> None:
         questionary.print("Library is empty.")
         return
 
-    def _int(v):
-        try:
-            return int(float(v))
-        except (TypeError, ValueError):
-            return 0
-
     artist_songs: dict[str, set] = collections.defaultdict(set)
     artist_display: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     pair_copies: collections.Counter = collections.Counter()
@@ -2035,32 +2078,26 @@ def library_stats(store: TrackStore) -> None:
         for d in sorted(decades):
             L(f"  {d}s  {decades[d]:,}")
 
+def _mp3_size(t: Track) -> int:
+    """The ranking key _best_track and _ranked_tracks share, so the Songbook's
+    pick and Final-final's can never disagree. Missing or unparseable is 0."""
+    raw = t.metadata.get("mp3_size")
+    try:
+        return int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _best_track(tracks: list[Track]) -> Track:
     """ Pick one track to represent an artist-song pair."""
     
     # Basic guess: return the track with the largest MP3 size in metadata.
-    def _mp3_size(t: Track) -> int:
-        raw = t.metadata.get("mp3_size")
-        if raw is None:
-            return 0
-        try:
-            return int(raw)
-        except ValueError:
-            return 0
-
     return max(tracks, key=_mp3_size)
 
 
 def _ranked_tracks(tracks: list[Track]) -> list[Track]:
     """The copies of one artist-song pair, best-first (largest MP3 wins), so
     the export can keep the best N versions rather than only the single best."""
-    def _mp3_size(t: Track) -> int:
-        raw = t.metadata.get("mp3_size")
-        try:
-            return int(raw) if raw is not None else 0
-        except (TypeError, ValueError):
-            return 0
-
     return sorted(tracks, key=_mp3_size, reverse=True)
 
 def tracks_to_keep(store: TrackStore) -> None:
@@ -2086,13 +2123,9 @@ def tracks_to_keep(store: TrackStore) -> None:
     # How many copies of each song to export (1 = best only, as before). Extra
     # copies become selectable "versions" in the index for players like
     # KriticalDJ. Remembered between runs.
-    try:
-        default_vl = int(cfg.get("version_limit", 1))
-    except (TypeError, ValueError):
-        default_vl = 1
     vl_raw = questionary.text(
         "Max versions to export per song (1 = best only):",
-        default=str(default_vl),
+        default=str(_saved_version_limit(cfg)),
     ).ask()
     if vl_raw is None:
         return
@@ -2202,13 +2235,17 @@ def tracks_to_keep(store: TrackStore) -> None:
     questionary.print(msg)
 
     # Optional prune of stale files from earlier runs. Restricted to this tool's
-    # own <prefix>/<artist>/<file> layout so unrelated files are never touched.
+    # own <prefix>/<artist>/<file> layout so unrelated files are never touched:
+    # the prefix is the single a-z or '#' the export picks, and the file is one
+    # of the types it copies.
     if output_root.exists():
         want = {d.resolve() for d in expected}
         stale = [
             p for p in output_root.rglob("*")
             if p.is_file()
             and len(p.relative_to(output_root).parts) == 3
+            and re.fullmatch("[a-z#]", p.parent.parent.name)
+            and p.suffix in (".mp3", ".cdg", ".zip")
             and p.resolve() not in want
         ]
         if stale and questionary.confirm(
@@ -2217,8 +2254,10 @@ def tracks_to_keep(store: TrackStore) -> None:
         ).ask():
             for p in tqdm(stale, desc="Pruning", unit="file"):
                 p.unlink()
+            # Drop only the artist folders this emptied, then their prefix
+            # folders; empty directories anywhere else are not ours to remove.
             for d in sorted(
-                (d for d in output_root.rglob("*") if d.is_dir()),
+                {p.parent for p in stale} | {p.parent.parent for p in stale},
                 key=lambda x: len(x.parts), reverse=True,
             ):
                 try:
