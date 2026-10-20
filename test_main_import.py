@@ -29,6 +29,12 @@ def test_config_unreadable_is_empty(m) -> None:
     assert m._load_config() == {}
 
 
+def test_config_of_the_wrong_shape_is_empty(m) -> None:
+    m._CONFIG_PATH.parent.mkdir(parents=True)
+    m._CONFIG_PATH.write_text(json.dumps(["x"]), encoding="utf-8")
+    assert m._load_config() == {}
+
+
 def test_aliases_drop_blank_and_identity_entries(m) -> None:
     m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
     m._ARTIST_ALIASES_PATH.write_text(json.dumps({"aliases": {
@@ -41,6 +47,20 @@ def test_aliases_missing_or_unreadable(m) -> None:
     m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
     m._ARTIST_ALIASES_PATH.write_text("[", encoding="utf-8")
     assert m._load_aliases() == {}
+
+
+@pytest.mark.parametrize("payload", [[], {"aliases": ["x"]}])
+def test_aliases_of_the_wrong_shape_are_empty(m, payload) -> None:
+    m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
+    m._ARTIST_ALIASES_PATH.write_text(json.dumps(payload), encoding="utf-8")
+    assert m._load_aliases() == {}
+
+
+def test_aliases_drop_entries_that_are_not_names(m) -> None:
+    m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
+    m._ARTIST_ALIASES_PATH.write_text(json.dumps({"aliases": {
+        "Jones, Tom": "Tom Jones", "List": ["Tom Jones"], "Number": 7}}), encoding="utf-8")
+    assert m._load_aliases() == {"Jones, Tom": "Tom Jones"}
 
 
 def test_key_overrides_accept_both_shapes_and_normalise_keys(m) -> None:
@@ -57,6 +77,19 @@ def test_key_overrides_missing_or_unreadable(m) -> None:
     m._KEY_OVERRIDES_PATH.parent.mkdir(parents=True)
     m._KEY_OVERRIDES_PATH.write_text("nope", encoding="utf-8")
     assert m._load_key_overrides() == {}
+
+
+def test_key_overrides_of_the_wrong_shape_are_empty(m) -> None:
+    m._KEY_OVERRIDES_PATH.parent.mkdir(parents=True)
+    m._KEY_OVERRIDES_PATH.write_text(json.dumps({"overrides": ["x"]}), encoding="utf-8")
+    assert m._load_key_overrides() == {}
+
+
+def test_key_overrides_drop_entries_that_are_not_key_strings(m) -> None:
+    m._KEY_OVERRIDES_PATH.parent.mkdir(parents=True)
+    m._KEY_OVERRIDES_PATH.write_text(json.dumps(
+        {"version": 1, "A - B": "8A", "C - D": ["Am"]}), encoding="utf-8")
+    assert m._load_key_overrides() == {"a - b": "8A"}
 
 
 def test_default_scan_dir(m, store) -> None:

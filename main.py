@@ -50,9 +50,10 @@ def _load_config() -> dict:
         return {}
     try:
         with open(p, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (ValueError, OSError):
         return {}
+    return data if isinstance(data, dict) else {}  # wrong shape == invalid
 
 
 def _save_config(cfg: dict) -> None:
@@ -66,13 +67,20 @@ def _save_config(cfg: dict) -> None:
 def _load_aliases() -> dict:
     """The artist alias map (variant -> canonical) from artist-aliases.json;
     {} when the file is absent or unreadable. Shared by Unify, Uncomma, and
-    Search so a curated rename is enforced everywhere new names can enter."""
+    Search so a curated rename is enforced everywhere new names can enter.
+
+    A file of the wrong shape (not ``{"aliases": {...}}``) counts as
+    unreadable; an entry whose canonical name is not a string is dropped like
+    a blank one."""
     try:
         with open(_ARTIST_ALIASES_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (ValueError, OSError):
         return {}
-    return {k: v for k, v in data.get("aliases", {}).items() if v and k != v}
+    src = data.get("aliases", {}) if isinstance(data, dict) else {}
+    if not isinstance(src, dict):
+        return {}
+    return {k: v for k, v in src.items() if v and isinstance(v, str) and k != v}
 
 
 def _load_key_overrides() -> dict:
@@ -80,14 +88,19 @@ def _load_key_overrides() -> dict:
 
     key-overrides.json maps ``"<artist> - <song>"`` (matched case-insensitively
     on the track's current fields) to a key string in any form normalize_key
-    accepts (``"A minor"``, ``"Am"``, ``"8A"``...). {} when absent/unreadable."""
+    accepts (``"A minor"``, ``"Am"``, ``"8A"``...). {} when absent/unreadable,
+    or when the map is not an object; an entry whose value is not a string is
+    dropped like a blank one."""
     try:
         with open(_KEY_OVERRIDES_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (ValueError, OSError):
         return {}
     src = data.get("overrides", data) if isinstance(data, dict) else {}
-    return {str(k).strip().lower(): v for k, v in src.items() if v}
+    if not isinstance(src, dict):
+        return {}
+    return {str(k).strip().lower(): v for k, v in src.items()
+            if v and isinstance(v, str)}
 
 
 def _default_scan_dir(store: TrackStore) -> str:
@@ -1818,7 +1831,8 @@ def apply_resolutions(store: TrackStore) -> None:
     For each path present in the store it sets the artist/song and marks the
     track reviewed ('ok'), recording provenance in metadata ('artist_from' =
     'resolutions'). Entries missing 'artist'/'song' leave that field unchanged.
-    Paths not in the store are skipped and counted. Prompts for a dry run first
+    Paths not in the store are skipped and counted; an entry that is not an
+    object is reported and skipped. Prompts for a dry run first
     so the whole change set can be eyeballed before anything is written."""
     p = Path(_RESOLUTIONS_PATH)
     if not p.exists():
@@ -1830,7 +1844,11 @@ def apply_resolutions(store: TrackStore) -> None:
     except (ValueError, OSError) as exc:
         questionary.print(f"Could not read resolutions: {exc}")
         return
-    res = data.get("resolutions", {})
+    res = data.get("resolutions", {}) if isinstance(data, dict) else None
+    if not isinstance(res, dict):
+        questionary.print(
+            'Could not read resolutions: expected {"resolutions": {"<track path>": {...}}}.')
+        return
     if not res:
         questionary.print("Resolutions file has no entries.")
         return
@@ -1847,6 +1865,9 @@ def apply_resolutions(store: TrackStore) -> None:
 
     applied = missing = unchanged = 0
     for path, r in res.items():
+        if not isinstance(r, dict):
+            questionary.print(f"Skipping malformed entry (not an object): {path}")
+            continue
         track = store.get(path)
         if track is None:
             missing += 1
