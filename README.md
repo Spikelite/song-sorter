@@ -234,6 +234,9 @@ The interactive menu (`python main.py`) operates on a persistent track store
 - **Final-final** — For each artist/song group, pick the best copy (largest
   MP3) and export its files into an output tree organized as
   `<output>/<first-letter>/<artist>/<name>.<ext>`, skipping unknown artists.
+  Two different songs whose files share a name (say `Track 01` on two discs)
+  are kept apart: the one later by source path gets ` (<source folder>)`
+  added to its name, and every other file keeps its own.
   The output directory is prompted and **remembered** between runs. Re-running
   is safe and incremental — files already present and unchanged are skipped —
   and it can optionally **prune** stale files left by earlier runs (e.g. after

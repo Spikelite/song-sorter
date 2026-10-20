@@ -2092,6 +2092,38 @@ def _ranked_tracks(tracks: list[Track]) -> list[Track]:
 
     return sorted(tracks, key=_mp3_size, reverse=True)
 
+def _export_stems(claims: list[tuple[str, Track]]) -> dict[str, str]:
+    """The output filename stem for each exported copy, keyed by source path.
+
+    `claims` pairs every copy being exported with its '<prefix>/<artist>'
+    output folder. A copy keeps its source stem unless another copy in the
+    same folder already holds that name (two songs both ripped as 'Track 01',
+    say), when it gets ' (<source folder>)' appended, the label versions
+    already use, plus a counter if even that is taken. Claims are settled in
+    sorted source-path order so every run names them the same way, and
+    compared case-insensitively since the output may sit on a case-insensitive
+    filesystem. Copies with no collision keep exactly the name they had."""
+    used: set[tuple[str, str]] = set()
+    stems: dict[str, str] = {}
+    collided: list[tuple[str, Track]] = []
+    for folder, t in sorted(claims, key=lambda c: c[1].path):
+        stem = Path(t.path).stem
+        if (folder, stem.casefold()) in used:
+            collided.append((folder, t))
+            continue
+        used.add((folder, stem.casefold()))
+        stems[t.path] = stem
+    for folder, t in collided:
+        src = Path(t.path)
+        label = src.parent.name or "Alternate"
+        stem, n = f"{src.stem} ({label})", 2
+        while (folder, stem.casefold()) in used:
+            stem, n = f"{src.stem} ({label} {n})", n + 1
+        used.add((folder, stem.casefold()))
+        stems[t.path] = stem
+    return stems
+
+
 def tracks_to_keep(store: TrackStore) -> None:
     """Export one best copy per artist+song to an output tree, laid out as
     <output>/<first-letter>/<artist>/<name>.<ext> (unknown artists skipped).
@@ -2132,9 +2164,20 @@ def tracks_to_keep(store: TrackStore) -> None:
     cfg["version_limit"] = version_limit
     _save_config(cfg)
 
-    # Collect the desired output: dest -> source, one best copy per artist+song.
-    expected: dict[Path, Path] = {}
-    index_entries: list[dict] = []
+    def _playable_ext(t: Track):
+        return "zip" if "zip" in t.file_types else \
+            ("mp3" if "mp3" in t.file_types else None)
+
+    def _dur(t: Track) -> int:
+        try:
+            return int(float(t.metadata.get("length_seconds", "") or 0))
+        except ValueError:
+            return 0
+
+    # Gather what gets exported before naming any of it: two different songs
+    # can share a source stem ('Track 01' on two discs), and resolving that
+    # needs every claim on an output folder at once (GH #28).
+    songs: list[tuple[str, str, list[Track]]] = []  # (prefix, artist folder, copies)
     node_set = [ArtistIndex.from_store(store).get_root()]
     while node_set:
         n = node_set.pop()
@@ -2142,6 +2185,8 @@ def tracks_to_keep(store: TrackStore) -> None:
             node_set.extend(n.list_nodes().values())
             continue
         ranked = _ranked_tracks(n.list_tracks())  # best-first
+        if not ranked:
+            continue  # an empty library's root is a leaf with no tracks (GH #27)
         best = ranked[0]
         artist = clean_artist(best.artist)
         if artist in ("", "unknown"):
@@ -2150,20 +2195,26 @@ def tracks_to_keep(store: TrackStore) -> None:
         # folder-safe: an artist like 'ac/dc' must not nest an extra directory
         # level (the pruner's depth==3 filter would never see those files)
         artist = safe_folder(artist)
+        # Extra copies (up to version_limit total) are exported alongside and
+        # listed as selectable versions, but only for a playable best copy.
         stem = Path(best.path).stem
+        alts = [alt for alt in ranked[1:version_limit]
+                if _playable_ext(alt) is not None      # unplayable
+                and Path(alt.path).stem != stem        # or the best copy's own name
+                ] if _playable_ext(best) else []
+        songs.append((prefix, artist, [best] + alts))
+
+    out_stem = _export_stems([(f"{prefix}/{artist}", t)
+                              for prefix, artist, copies in songs for t in copies])
+
+    # The desired output: dest -> source, plus the index entries.
+    expected: dict[Path, Path] = {}
+    index_entries: list[dict] = []
+    for prefix, artist, (best, *alts) in songs:
+        stem = out_stem[best.path]
         for exn in best.file_types:
             src = Path(best.path).with_suffix(f".{exn}")  # per-type source (.mp3/.cdg/.zip)
             expected[output_root / prefix / artist / f"{stem}.{exn}"] = src
-
-        def _playable_ext(t: Track):
-            return "zip" if "zip" in t.file_types else \
-                ("mp3" if "mp3" in t.file_types else None)
-
-        def _dur(t: Track) -> int:
-            try:
-                return int(float(t.metadata.get("length_seconds", "") or 0))
-            except ValueError:
-                return 0
 
         # Curated index entry for external players (e.g. KriticalDJ): cleaned
         # artist/song strings + duration, pointing at the playable file, so
@@ -2183,15 +2234,12 @@ def tracks_to_keep(store: TrackStore) -> None:
             # omitted entirely otherwise -- backward compatible with readers
             # that don't know about keys.
             entry.update(key_detect.key_index_fields(best.metadata))
-            # Extra copies (up to version_limit total) are exported alongside
-            # and listed as selectable versions. Label = the source's folder
-            # (usually the karaoke brand/disc) so the KJ can tell them apart.
+            # Label = the source's folder (usually the karaoke brand/disc) so
+            # the KJ can tell the versions apart.
             versions = []
-            for alt in ranked[1:version_limit]:
-                astem = Path(alt.path).stem
+            for alt in alts:
+                astem = out_stem[alt.path]
                 aext = _playable_ext(alt)
-                if aext is None or astem == stem:  # unplayable or name-collision
-                    continue
                 for exn in alt.file_types:
                     expected[output_root / prefix / artist / f"{astem}.{exn}"] = \
                         Path(alt.path).with_suffix(f".{exn}")
