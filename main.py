@@ -2182,6 +2182,16 @@ def _export_stems(claims: list[tuple[str, Track, bool]]) -> dict[str, str]:
     return stems
 
 
+def _export_is_current(dest: Path, src: Path) -> bool:
+    """True when an exported file still matches its source: same size AND
+    same modification time (copy2 preserves it, so an unchanged export
+    matches on both). Size alone missed a destination that now maps to a
+    different rip of the same size, leaving the old audio in place (GH #39).
+    The 2s slack covers FAT/SMB timestamp granularity."""
+    d, s = dest.stat(), src.stat()
+    return d.st_size == s.st_size and abs(d.st_mtime - s.st_mtime) <= 2
+
+
 def tracks_to_keep(store: TrackStore) -> None:
     """Export one best copy per artist+song to an output tree, laid out as
     <output>/<first-letter>/<artist>/<name>.<ext> (unknown artists skipped).
@@ -2322,7 +2332,7 @@ def tracks_to_keep(store: TrackStore) -> None:
         if not src.exists():
             missing += 1
             continue
-        if dest.exists() and dest.stat().st_size == src.stat().st_size:
+        if dest.exists() and _export_is_current(dest, src):
             skipped += 1
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
