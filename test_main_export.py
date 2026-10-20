@@ -202,6 +202,27 @@ def test_prune_removes_only_stale_depth_three_files(m, store, prompts, tmp_path)
     assert "Pruned 1 stale file(s)" in prompts.output
 
 
+def test_prune_leaves_everything_outside_its_own_layout(m, store, prompts, tmp_path) -> None:
+    store.add(_src(tmp_path, "SC/Abba - Waterloo.zip"))
+    out = tmp_path / "out"
+    for rel in ("q/queen/Queen - Old.zip", "#/10cc/10cc - Old.cdg",   # stale exports
+                "a/abba/Abba - Old.mp3",
+                "a/abba/cover.jpg", "notes/2024/todo.txt"):           # not ours
+        (out / rel).parent.mkdir(parents=True, exist_ok=True)
+        (out / rel).write_bytes(b"x")
+    (out / "b" / "empty").mkdir(parents=True)                # unrelated empty dirs
+    (out / "unrelated").mkdir()
+    _export(m, prompts, out, prune=True)
+    m.tracks_to_keep(store)
+    assert not (out / "q").exists() and not (out / "#").exists()
+    assert not (out / "a" / "abba" / "Abba - Old.mp3").exists()
+    assert (out / "a" / "abba" / "cover.jpg").exists()
+    assert (out / "a" / "abba" / "Abba - Waterloo.zip").exists()
+    assert (out / "notes" / "2024" / "todo.txt").exists()
+    assert (out / "b" / "empty").is_dir() and (out / "unrelated").is_dir()
+    assert "Pruned 3 stale file(s)" in prompts.output
+
+
 def test_prune_can_be_declined(m, store, prompts, tmp_path) -> None:
     store.add(_src(tmp_path, "SC/Abba - Waterloo.zip"))
     out = tmp_path / "out"

@@ -2238,13 +2238,17 @@ def tracks_to_keep(store: TrackStore) -> None:
     questionary.print(msg)
 
     # Optional prune of stale files from earlier runs. Restricted to this tool's
-    # own <prefix>/<artist>/<file> layout so unrelated files are never touched.
+    # own <prefix>/<artist>/<file> layout so unrelated files are never touched:
+    # the prefix is the single a-z or '#' the export picks, and the file is one
+    # of the types it copies.
     if output_root.exists():
         want = {d.resolve() for d in expected}
         stale = [
             p for p in output_root.rglob("*")
             if p.is_file()
             and len(p.relative_to(output_root).parts) == 3
+            and re.fullmatch("[a-z#]", p.parent.parent.name)
+            and p.suffix in (".mp3", ".cdg", ".zip")
             and p.resolve() not in want
         ]
         if stale and questionary.confirm(
@@ -2253,8 +2257,10 @@ def tracks_to_keep(store: TrackStore) -> None:
         ).ask():
             for p in tqdm(stale, desc="Pruning", unit="file"):
                 p.unlink()
+            # Drop only the artist folders this emptied, then their prefix
+            # folders; empty directories anywhere else are not ours to remove.
             for d in sorted(
-                (d for d in output_root.rglob("*") if d.is_dir()),
+                {p.parent for p in stale} | {p.parent.parent for p in stale},
                 key=lambda x: len(x.parts), reverse=True,
             ):
                 try:
