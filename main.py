@@ -1276,7 +1276,9 @@ def _reliable_words(fragments: list[str]) -> list[str]:
         else:
             words += w[1:-1]
     words = [re.sub(r"[^A-Za-z0-9']", "", x) for x in words]
-    words = sorted({x for x in words if len(x) >= 3}, key=len, reverse=True)
+    # longest first, ties alphabetical: a set iterates in hash-seed order, so
+    # a bare key=len made the query (and the hit) vary run to run (GH #26)
+    words = sorted({x for x in words if len(x) >= 3}, key=lambda x: (-len(x), x))
     return words[:3]
 
 

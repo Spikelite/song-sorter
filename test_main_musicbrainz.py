@@ -279,9 +279,9 @@ def test_reliable_words_keep_only_certainly_complete_words(m) -> None:
     assert m._reliable_words(["Tur", "E Loose Now", "Baby Please"]) == ["Please", "Loose"]
 
 
-@pytest.mark.xfail(strict=True, reason="GH #26: equal-length words are picked in "
-                   "hash-seed order, so Restitch queries differ between runs")
 def test_reliable_words_are_deterministic_under_ties(m) -> None:
+    """GH #26: equal-length words were picked in set (hash-seed) order, so the
+    Restitch query, and the hit it found, changed from run to run."""
     import subprocess
     import sys
     code = ("import main; print(main._reliable_words("
