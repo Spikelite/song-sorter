@@ -305,6 +305,7 @@ def refresh_names(store: TrackStore, root: Path) -> None:
                     if track is not None and track.artist.lower() in ("unknown", ""):
                         track.artist = ca
                         track.song = cs
+                        possible += 1
                         added += 1
                         continue
                 print(f"Skip unexpected: {stem}")
@@ -767,6 +768,7 @@ def fix_unknown(store: TrackStore) -> None:
                     space_split += 1
             else:
                 print(f"Complex space: {song}")
+                complex_split += 1
         elif ',' in song:
             split = [s.strip() for s in song.split(',')]
             if len(split) == 2:
@@ -795,7 +797,7 @@ def fix_unknown(store: TrackStore) -> None:
                 print(f"candidate: '{split[-1]}' - '{' '.join(split[:-1])}'  [{song}]")
             no_split += 1
 
-    questionary.print(f"Success {success}, simple {simple_split}, id {id_split}, Complex {complex_split}, Comma {comma_split}. No Split {no_split}")
+    questionary.print(f"Success {success}, simple {simple_split}, id {id_split}, Complex {complex_split}, Comma {comma_split}, Space {space_split}. No Split {no_split}")
 
 def _tracks_to_review(store: TrackStore, review_state: ReviewState) -> list[Track]:
     """ Part of manual track review - build a list of unreviewed tracks.

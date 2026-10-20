@@ -318,6 +318,20 @@ def test_refresh_recovers_compact_stems_only_for_unknown_tracks(m, store, tmp_pa
     assert got[str(cur.resolve())] == ("Curated", "Keep")  # never clobbered
 
 
+def test_refresh_counts_catalog_recoveries_as_possible(m, store, tmp_path, capsys) -> None:
+    _known(store, "Abba")
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    cat = lib / "DIS61201-13-MARY POPPINS-I LOVE TO LAUGH.cdg"   # compact catalog stem
+    two = lib / "Abba - Waterloo.zip"                             # two-part stem
+    for p in (cat, two):
+        p.write_bytes(b"c")
+    store.add(make_track(path=str(cat.resolve()), artist="Unknown", song="whole stem"))
+    store.add(make_track(path=str(two.resolve()), artist="?", song="?"))
+    m.refresh_names(store, lib)
+    assert "Modified 2 tracks of 2 possible." in capsys.readouterr().out
+
+
 def test_refresh_skips_three_part_and_unparseable_stems(m, store, tmp_path, capsys) -> None:
     lib = tmp_path / "lib"
     lib.mkdir()
