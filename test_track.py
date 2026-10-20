@@ -54,6 +54,14 @@ def test_store_add_and_all() -> None:
     assert len(store.all()) == 2
 
 
+def test_store_get_by_path() -> None:
+    store = TrackStore()
+    t = Track(path="/a.zip", file_types=["zip"], artist="A", song="S")
+    store.add(t)
+    assert store.get("/a.zip") is t
+    assert store.get("/missing.zip") is None
+
+
 def test_store_add_replaces_same_path() -> None:
     store = TrackStore()
     t1 = Track(path="/same.mp3", file_types=["mp3"], artist="A", song="S1")

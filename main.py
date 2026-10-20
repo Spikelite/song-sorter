@@ -2846,13 +2846,6 @@ def find_swapped(store: TrackStore) -> None:
             total_swaps += 1
 
     questionary.print(f"Available {total_swaps} in {len(swap_folder)}")
-    for k, v in swap_folder.items():
-        if len(v) < 3:
-            pass
-            # print(f"{len(v)} : {k} : \t{v[0].artist}-{v[0].song}")
-        else:
-            pass
-            # print(f"{len(v)} : {k}")
 
     total_swaps = 0
     for k, v in swap_folder.items():

@@ -185,7 +185,8 @@ def to_camelot(key: str | None) -> str | None:
     for num, tonic in table.items():
         if tonic == pc:
             return f"{num}{letter}"
-    return None
+    # Unreachable: every one of the 12 pitch classes sits on both Camelot rings.
+    return None  # pragma: no cover
 
 
 def keys_agree(a: str | None, b: str | None) -> bool:

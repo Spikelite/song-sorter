@@ -1,0 +1,8 @@
+# Test, coverage and lint tooling for development and CI. Not needed to run
+# song-sorter itself.
+-r requirements.txt
+pytest-cov>=4.1
+pyflakes>=3.0
+# Only so the librosa stub in the tests can hand back real arrays; the
+# offline key detector itself still gets numpy via librosa in production.
+numpy>=1.21

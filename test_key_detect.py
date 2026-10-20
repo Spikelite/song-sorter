@@ -87,6 +87,11 @@ def test_normalize_camelot() -> None:
     assert normalize_key("5B") == "D# major"    # Eb major
 
 
+def test_normalize_camelot_out_of_range() -> None:
+    for raw in ("0A", "13A", "13B", "99b"):
+        assert normalize_key(raw) is None
+
+
 def test_normalize_unknown_and_atonal() -> None:
     for raw in ("", "  ", "off", "o", "none", "-", "xyz", None, "H"):
         assert normalize_key(raw) is None
