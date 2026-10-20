@@ -269,6 +269,14 @@ def test_format_metadata_defaults(m) -> None:
     assert m._format_metadata({}) == "sec , bitrate 0 m.sz 0k c.sz 0k m#  c# "
 
 
+def test_format_metadata_tolerates_blank_and_non_integer_numbers(m) -> None:
+    assert m._format_metadata({"bitrate_bps": "", "mp3_size": "1.5", "cdg_size": "inf"}) \
+        == "sec , bitrate 0 m.sz 0k c.sz 0k m#  c# "
+    assert m._format_metadata({"bitrate_bps": "128000.0", "mp3_size": "n/a",
+                               "cdg_size": ["junk"]}) \
+        == "sec , bitrate 128 m.sz 0k c.sz 0k m#  c# "
+
+
 # --- refresh_names (Refresh) -----------------------------------------------
 
 def _known(store, artist, n=6):

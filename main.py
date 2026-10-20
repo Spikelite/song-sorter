@@ -258,14 +258,23 @@ def add_details(store: TrackStore, root: Path, workers: int = 4,
     store.save(_CACHE_PATH)  # final checkpoint once detailing completes
     print(f"\nAdded {added} track(s), skipped {skipped} unchanged.")
 
+def _int(v) -> int:
+    """A numeric metadata value as an int (floats truncate); a missing, blank
+    or junk value (a hand-edited cache, say) counts as 0 rather than raising."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _format_metadata(metadata: dict[str, str]) -> str:
     
     length = metadata.get("length_seconds", "")
-    bitrate = int(int(metadata.get("bitrate_bps", "0"))/1000)
+    bitrate = int(_int(metadata.get("bitrate_bps", "0"))/1000)
     track_summary = f"sec {length}, bitrate {bitrate}"
 
-    mp3_size = int(int(metadata.get("mp3_size", "0"))/1000)
-    cdg_size = int(int(metadata.get("cdg_size", "0"))/1000)
+    mp3_size = int(_int(metadata.get("mp3_size", "0"))/1000)
+    cdg_size = int(_int(metadata.get("cdg_size", "0"))/1000)
     mp3_hash = metadata.get("mp3_hash", "")[:6]
     cdg_hash = metadata.get("cdg_hash", "")[:6]
 
@@ -1992,12 +2001,6 @@ def library_stats(store: TrackStore) -> None:
         questionary.print("Library is empty.")
         return
 
-    def _int(v):
-        try:
-            return int(float(v))
-        except (TypeError, ValueError):
-            return 0
-
     artist_songs: dict[str, set] = collections.defaultdict(set)
     artist_display: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     pair_copies: collections.Counter = collections.Counter()
@@ -2075,32 +2078,26 @@ def library_stats(store: TrackStore) -> None:
         for d in sorted(decades):
             L(f"  {d}s  {decades[d]:,}")
 
+def _mp3_size(t: Track) -> int:
+    """The ranking key _best_track and _ranked_tracks share, so the Songbook's
+    pick and Final-final's can never disagree. Missing or unparseable is 0."""
+    raw = t.metadata.get("mp3_size")
+    try:
+        return int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _best_track(tracks: list[Track]) -> Track:
     """ Pick one track to represent an artist-song pair."""
     
     # Basic guess: return the track with the largest MP3 size in metadata.
-    def _mp3_size(t: Track) -> int:
-        raw = t.metadata.get("mp3_size")
-        if raw is None:
-            return 0
-        try:
-            return int(raw)
-        except ValueError:
-            return 0
-
     return max(tracks, key=_mp3_size)
 
 
 def _ranked_tracks(tracks: list[Track]) -> list[Track]:
     """The copies of one artist-song pair, best-first (largest MP3 wins), so
     the export can keep the best N versions rather than only the single best."""
-    def _mp3_size(t: Track) -> int:
-        raw = t.metadata.get("mp3_size")
-        try:
-            return int(raw) if raw is not None else 0
-        except (TypeError, ValueError):
-            return 0
-
     return sorted(tracks, key=_mp3_size, reverse=True)
 
 def tracks_to_keep(store: TrackStore) -> None:

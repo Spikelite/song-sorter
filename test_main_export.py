@@ -60,6 +60,12 @@ def test_ranked_tracks_tolerate_non_string_sizes(m) -> None:
     assert m._ranked_tracks([t]) == [t]
 
 
+def test_best_track_tolerates_non_string_sizes(m) -> None:
+    t = make_track("/a")
+    t.metadata["mp3_size"] = ["bad"]
+    assert m._best_track([t]) is t
+
+
 # --- tracks_to_keep: prompts ------------------------------------------------
 
 @pytest.mark.parametrize("answers", [[None], ["   "], ["/out", None]])
