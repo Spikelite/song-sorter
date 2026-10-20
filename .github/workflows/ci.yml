@@ -16,6 +16,12 @@ concurrency:
 jobs:
   test:
     name: Python ${{ matrix.python }}
+    # Hosted on purpose, and keep it hardcoded. song-sorter is public, and
+    # Spikelite/GitHub-Runner-Control's docs/routing-policy.md bars public
+    # repos from the self-hosted fleet: a fork's pull request would run as
+    # root on worker-0000. Do not switch this to `vars.CI_RUNS_ON`; that
+    # pattern exists to route PRIVATE repos onto the fleet. Hosted standard
+    # runners are free for public repos, so this spends no scarce minutes.
     runs-on: ubuntu-latest
     # The official images: full (not -slim) so zipfile-deflate64 has a compiler
     # to build with. Using the same images for local verification keeps CI and
