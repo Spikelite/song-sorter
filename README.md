@@ -90,7 +90,7 @@ The interactive menu (`python main.py`) operates on a persistent track store
   known artist (while the artist field is not) are never auto-ok'd — on
   reversed rips the tag is often reversed too — they're left for **Tag-swap**.
 - **Tag-swap** — Fix reversed artist/song parses. Two kinds of evidence, each
-  requiring the song-field value to be a **known artist** (≥3 tracks,
+  requiring the song-field value to be a **known artist** (4+ tracks,
   comma-aware: `Lavigne, Avril` counts) while the current artist is not:
   the ID3 `tag_artist` matches the **song** field, or the song field is a
   `Last, First` comma name (real titles essentially never look like that).
@@ -210,8 +210,9 @@ The interactive menu (`python main.py`) operates on a persistent track store
   artist). Ambiguous tags (bare numbers, catalog-style IDs) are kept and
   flagged in metadata (`artist_review`) for later review rather than guessed at.
 - **Unswap** — Find tracks whose **song** field is actually a known artist
-  name (and whose artist field isn't), and swap them — applied only where ≥3
-  such tracks in the same folder agree.
+  name (and whose artist field isn't), and swap them — applied only where 4+
+  such songs in the same folder agree (several copies of one song there count
+  once). Every copy of an agreeing song is swapped, so it stays in one place.
 - **Uncomma** — Convert `"Last, First"` artist names to `"First Last"` when
   the swap is safe for a person's name (band names with commas like
   `"Earth, Wind & Fire"` and multi-artist credits are left alone;
@@ -223,7 +224,8 @@ The interactive menu (`python main.py`) operates on a persistent track store
   `"A Whole New World"`). Deterministic — only fires when a field *ends* in
   `", The/A/An"`, so multi-comma names like `"Earth, Wind & Fire"` are untouched.
 - **Ungroup** — For `"Artist & Someone & Else"`, keep the primary artist and
-  move the trailing collaborators into a `feature` field.
+  move the trailing collaborators into a `feature` field, on every copy of
+  the song.
 - **Fuzz** — Merge near-duplicate **artist** spellings (fuzzy ratio ≥ 90),
   folding the rarer spelling into the more common one (artists with >5 tracks
   are assumed canonical and skipped).
@@ -234,6 +236,9 @@ The interactive menu (`python main.py`) operates on a persistent track store
 - **Final-final** — For each artist/song group, pick the best copy (largest
   MP3) and export its files into an output tree organized as
   `<output>/<first-letter>/<artist>/<name>.<ext>`, skipping unknown artists.
+  Two different songs whose files share a name (say `Track 01` on two discs)
+  are kept apart: the one later by source path gets ` (<source folder>)`
+  added to its name, and every other file keeps its own.
   The output directory is prompted and **remembered** between runs. Re-running
   is safe and incremental — files already present and unchanged are skipped —
   and it can optionally **prune** stale files left by earlier runs (e.g. after

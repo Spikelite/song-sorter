@@ -384,20 +384,36 @@ class ArtistIndex:
         self._root = IndexNode()
 
         for t in store:
-            art = clean_artist(t.artist)
-            song = clean_song(t.song)
-
-            # for easier browsing, group by first letter
-            prefix = art[0] if art else ""
-            if re.match("[^a-z]", prefix):
-                prefix = "#"
-
-            _parts = [prefix, art, song, t.path]
+            _parts = self._song_key(t) + [t.path]
 
             self._root.add(_parts, t)
 
+    @staticmethod
+    def _song_key(t: Track) -> list[str]:
+        """[prefix, clean artist, clean song]: the path to t's song node."""
+        art = clean_artist(t.artist)
+        song = clean_song(t.song)
+
+        # for easier browsing, group by first letter
+        prefix = art[0] if art else ""
+        if re.match("[^a-z]", prefix):
+            prefix = "#"
+        return [prefix, art, song]
+
     def get_root(self) -> IndexNode:
         return self._root
+
+    def copies(self, t: Track) -> list[Track]:
+        """Every track grouped with `t` as the same artist+song, `t` included.
+
+        single_artists() samples ONE track per song; a pass that acts on the
+        sample must apply the change to all of these, or the song ends up
+        split across two artists. Looks `t` up by its current fields, so call
+        it before changing them."""
+        node = self._root
+        for part in self._song_key(t):
+            node = node.nodes[part]
+        return node.list_tracks()
 
     def single_artists(self, max_songs: int = 3) -> list[Track]:
         """ return a artists with few tracks """

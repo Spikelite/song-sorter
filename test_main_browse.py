@@ -120,11 +120,31 @@ def test_bulk_edit_uncomma_splits_feature(m, store, prompts) -> None:
     assert t.metadata["feature"] == "Friends"
 
 
-def test_bulk_edit_uncomma_without_feature(m, store, prompts) -> None:
+def test_bulk_edit_uncomma_with_nothing_to_do_says_so(m, store, prompts) -> None:
     _add(store, make_track("/1", "Abba", "A"))
     prompts.queue("uncomma")
     m._bulk_edit_artist(store, _artist_node(store, "abba"))
     assert "feature" not in store.all()[0].metadata
+    assert "Left [Abba] as is" in prompts.output
+
+
+def test_bulk_edit_uncomma_leaves_a_comma_band_whole(m, store, prompts) -> None:
+    """GH #25: this renamed every Earth, Wind & Fire track to 'Wind Earth'."""
+    _add(store, make_track("/1", "Earth, Wind & Fire", "September"),
+         make_track("/2", "Earth, Wind & Fire", "Boogie Wonderland"))
+    prompts.queue("uncomma")
+    m._bulk_edit_artist(store, _artist_node(store, "earth, wind & fire"))
+    assert {t.artist for t in store.all()} == {"Earth, Wind & Fire"}
+    assert not any("feature" in t.metadata for t in store.all())
+
+
+def test_bulk_edit_uncomma_flips_a_corroborated_primary(m, store, prompts) -> None:
+    _add(store, make_track("/1", "Jones, Tom & Friends", "Delilah"),
+         make_track("/2", "Tom Jones", "Sex Bomb"), make_track("/3", "Tom Jones", "Kiss"))
+    prompts.queue("uncomma")
+    m._bulk_edit_artist(store, _artist_node(store, "jones, tom & friends"))
+    t = store.get("/1")
+    assert (t.artist, t.metadata["feature"]) == ("Tom Jones", "Friends")
 
 
 @pytest.mark.parametrize("answer", ["exit", None])

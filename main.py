@@ -534,7 +534,11 @@ def _bulk_edit_artist(store: TrackStore, node: IndexNode) -> None:
                 store.add(t)
     elif result == "uncomma":
         # raw-preserving: never write clean_artist output as a display name
-        prefix, feature = _auto_clean_artist(first_artist)
+        prefix, feature = _auto_clean_artist(first_artist, _known_clean_artists(store))
+        if prefix == first_artist and not feature:
+            questionary.print(f"Left [{first_artist}] as is: no known artist "
+                              "corroborates splitting or uncomma-ing it.")
+            return
 
         for t in all_tracks:
             print(f"Changing {t.artist} to {prefix}")
@@ -831,15 +835,38 @@ def _tracks_to_review(store: TrackStore, review_state: ReviewState) -> list[Trac
     return tracks
 
 
-def _auto_clean_artist(artist: str) -> tuple[str, str | None]:
+def _known_clean_artists(store: TrackStore) -> set[str]:
+    """Clean names the library or the alias map vouches for: the same
+    corroboration the Uncomma pass (standard_artist) relies on."""
+    known = set(ArtistIndex.from_store(store).count_artists())
+    known.update(clean_artist(v) for v in _load_aliases().values())
+    return known
+
+
+def _auto_clean_artist(artist: str, known: set[str]) -> tuple[str, str | None]:
     """Split a credit into (primary artist, feature) and uncomma the primary,
     PRESERVING raw casing -- the old version returned clean_artist output,
-    which put lowercased display names into the library."""
+    which put lowercased display names into the library.
+
+    A comma primary split off a credit needs corroboration from `known`
+    (clean_artist forms, see _known_clean_artists): it is uncomma'd when the
+    flipped name is known, or kept as written when that is known ('Beatles,
+    The'). Once '& Fire' is split off, 'Earth, Wind' looks exactly like a
+    person, so uncomma_artist's band guard can't see it (GH #25).
+    Uncorroborated, the credit is returned whole: splitting it alone would
+    still rename the band."""
     raw = re.sub(r"\s+(?:with|and|feat\.?|f\.|ft\.?|featuring)\s+", " & ",
                  artist, flags=re.IGNORECASE)
     if "&" in raw:
         prefix, feature = raw.split("&", 1)
         prefix, feature = prefix.strip(), feature.strip()
+        if "," in prefix:
+            flipped = uncomma_artist(prefix)
+            if flipped is not None and clean_artist(flipped) in known:
+                return flipped, feature
+            if clean_artist(prefix) in known:
+                return prefix, feature
+            return artist.strip(), None
     else:
         prefix, feature = raw.strip(), None
     prefix = uncomma_artist(prefix) or prefix
@@ -929,7 +956,7 @@ def swap_from_tags(store: TrackStore) -> None:
     """Fix reversed artist/song parses.
 
     Two kinds of evidence, each requiring the song-field value to be a known
-    artist (>=3 tracks, comma-aware) while the current artist is not (guards
+    artist (more than 3 tracks, comma-aware) while the current artist is not (guards
     against mislabeled tags and titles that merely look like artist names):
       - the ID3 tag_artist matches the SONG field, or
       - the song field is a comma name ("Lavigne, Avril") -- real titles
@@ -1310,7 +1337,9 @@ def _reliable_words(fragments: list[str]) -> list[str]:
         else:
             words += w[1:-1]
     words = [re.sub(r"[^A-Za-z0-9']", "", x) for x in words]
-    words = sorted({x for x in words if len(x) >= 3}, key=len, reverse=True)
+    # longest first, ties alphabetical: a set iterates in hash-seed order, so
+    # a bare key=len made the query (and the hit) vary run to run (GH #26)
+    words = sorted({x for x in words if len(x) >= 3}, key=lambda x: (-len(x), x))
     return words[:3]
 
 
@@ -1470,8 +1499,11 @@ def review_mode(store: TrackStore) -> None:
         questionary.print("No tracks from artists with 5 or fewer tracks.")
         return
 
-    # For the swapped-track warning: artists with >=3 tracks are "known".
+    # For the swapped-track warning: artists with more than 3 tracks are "known".
     known_artists = set(ArtistIndex.from_store(store).count_artists(low_bound=3))
+    # corroboration for auto-clean's uncomma (GH #25): a wider net than the
+    # warning above, matching the Uncomma pass
+    clean_known = _known_clean_artists(store)
 
     session_cache: dict[str, str] = {}
 
@@ -1507,8 +1539,9 @@ def review_mode(store: TrackStore) -> None:
             extra = []
             art_clean = clean_artist(track.artist)
             if '&' in art_clean or ',' in art_clean:
-                prefix, feature = _auto_clean_artist(track.artist)
-                extra.append(Choice(f"auto [{prefix}]", value="auto-clean"))
+                prefix, feature = _auto_clean_artist(track.artist, clean_known)
+                if prefix != track.artist or feature:
+                    extra.append(Choice(f"auto [{prefix}]", value="auto-clean"))
             mb_artist = track.metadata.get("mb_artist")
             mb_title = track.metadata.get("mb_title", "")
             if mb_artist:
@@ -1578,7 +1611,7 @@ def review_mode(store: TrackStore) -> None:
             track.artist, track.song = track.song, track.artist
             store.add(track)  # stay on this track
         elif result == "auto-clean":
-            prefix, feature = _auto_clean_artist(track.artist)
+            prefix, feature = _auto_clean_artist(track.artist, clean_known)
             track.artist = prefix
             if feature:
                 track.metadata["feature"] = feature.strip()
@@ -2100,6 +2133,55 @@ def _ranked_tracks(tracks: list[Track]) -> list[Track]:
     the export can keep the best N versions rather than only the single best."""
     return sorted(tracks, key=_mp3_size, reverse=True)
 
+def _export_stems(claims: list[tuple[str, Track, bool]]) -> dict[str, str]:
+    """The output filename stem for each exported copy, keyed by source path.
+
+    `claims` gives every copy being exported with its '<prefix>/<artist>'
+    output folder and whether it is its song's best copy. A copy keeps its
+    source stem unless a file it would write is already claimed in that
+    folder (two songs both ripped as 'Track 01.zip', say); then it gets
+    ' (<source folder>)' appended, the label versions already use, plus a
+    counter if even that is taken. An .mp3 and a .cdg also claim each other's
+    name, since players pair them by stem: one song's audio must never sit
+    beside another song's graphics.
+
+    Best copies are named before any alternate, so raising the version limit
+    never renames another song's main file, and a best copy with nothing
+    playable (no index entry) goes after the playable ones. Ties go by sorted
+    source path so every run agrees, and names compare case-insensitively
+    since the output may sit on a case-insensitive filesystem."""
+    def names(stem: str, t: Track) -> set[str]:
+        out: set[str] = set()
+        for ext in t.file_types:
+            out |= {f"{stem}.mp3", f"{stem}.cdg"} if ext in ("mp3", "cdg")                 else {f"{stem}.{ext}"}
+        return {n.casefold() for n in out}
+
+    def order(claim: tuple[str, Track, bool]):
+        _folder, t, best = claim
+        playable = "zip" in t.file_types or "mp3" in t.file_types
+        return (not best, not playable, t.path)
+
+    used: dict[str, set[str]] = collections.defaultdict(set)
+    stems: dict[str, str] = {}
+    collided: list[tuple[str, Track]] = []
+    for folder, t, _best in sorted(claims, key=order):
+        stem = Path(t.path).stem
+        if names(stem, t) & used[folder]:
+            collided.append((folder, t))
+            continue
+        used[folder] |= names(stem, t)
+        stems[t.path] = stem
+    for folder, t in collided:
+        src = Path(t.path)
+        label = src.parent.name or "Alternate"
+        stem, n = f"{src.stem} ({label})", 2
+        while names(stem, t) & used[folder]:
+            stem, n = f"{src.stem} ({label} {n})", n + 1
+        used[folder] |= names(stem, t)
+        stems[t.path] = stem
+    return stems
+
+
 def tracks_to_keep(store: TrackStore) -> None:
     """Export one best copy per artist+song to an output tree, laid out as
     <output>/<first-letter>/<artist>/<name>.<ext> (unknown artists skipped).
@@ -2136,9 +2218,20 @@ def tracks_to_keep(store: TrackStore) -> None:
     cfg["version_limit"] = version_limit
     _save_config(cfg)
 
-    # Collect the desired output: dest -> source, one best copy per artist+song.
-    expected: dict[Path, Path] = {}
-    index_entries: list[dict] = []
+    def _playable_ext(t: Track):
+        return "zip" if "zip" in t.file_types else \
+            ("mp3" if "mp3" in t.file_types else None)
+
+    def _dur(t: Track) -> int:
+        try:
+            return int(float(t.metadata.get("length_seconds", "") or 0))
+        except ValueError:
+            return 0
+
+    # Gather what gets exported before naming any of it: two different songs
+    # can share a source stem ('Track 01' on two discs), and resolving that
+    # needs every claim on an output folder at once (GH #28).
+    songs: list[tuple[str, str, list[Track]]] = []  # (prefix, artist folder, copies)
     node_set = [ArtistIndex.from_store(store).get_root()]
     while node_set:
         n = node_set.pop()
@@ -2146,6 +2239,8 @@ def tracks_to_keep(store: TrackStore) -> None:
             node_set.extend(n.list_nodes().values())
             continue
         ranked = _ranked_tracks(n.list_tracks())  # best-first
+        if not ranked:
+            continue  # an empty library's root is a leaf with no tracks (GH #27)
         best = ranked[0]
         artist = clean_artist(best.artist)
         if artist in ("", "unknown"):
@@ -2154,20 +2249,27 @@ def tracks_to_keep(store: TrackStore) -> None:
         # folder-safe: an artist like 'ac/dc' must not nest an extra directory
         # level (the pruner's depth==3 filter would never see those files)
         artist = safe_folder(artist)
+        # Extra copies (up to version_limit total) are exported alongside and
+        # listed as selectable versions, but only for a playable best copy.
         stem = Path(best.path).stem
+        alts = [alt for alt in ranked[1:version_limit]
+                if _playable_ext(alt) is not None      # unplayable
+                and Path(alt.path).stem != stem        # or the best copy's own name
+                ] if _playable_ext(best) else []
+        songs.append((prefix, artist, [best] + alts))
+
+    out_stem = _export_stems([(f"{prefix}/{artist}", t, i == 0)
+                              for prefix, artist, copies in songs
+                              for i, t in enumerate(copies)])
+
+    # The desired output: dest -> source, plus the index entries.
+    expected: dict[Path, Path] = {}
+    index_entries: list[dict] = []
+    for prefix, artist, (best, *alts) in songs:
+        stem = out_stem[best.path]
         for exn in best.file_types:
             src = Path(best.path).with_suffix(f".{exn}")  # per-type source (.mp3/.cdg/.zip)
             expected[output_root / prefix / artist / f"{stem}.{exn}"] = src
-
-        def _playable_ext(t: Track):
-            return "zip" if "zip" in t.file_types else \
-                ("mp3" if "mp3" in t.file_types else None)
-
-        def _dur(t: Track) -> int:
-            try:
-                return int(float(t.metadata.get("length_seconds", "") or 0))
-            except ValueError:
-                return 0
 
         # Curated index entry for external players (e.g. KriticalDJ): cleaned
         # artist/song strings + duration, pointing at the playable file, so
@@ -2187,15 +2289,12 @@ def tracks_to_keep(store: TrackStore) -> None:
             # omitted entirely otherwise -- backward compatible with readers
             # that don't know about keys.
             entry.update(key_detect.key_index_fields(best.metadata))
-            # Extra copies (up to version_limit total) are exported alongside
-            # and listed as selectable versions. Label = the source's folder
-            # (usually the karaoke brand/disc) so the KJ can tell them apart.
+            # Label = the source's folder (usually the karaoke brand/disc) so
+            # the KJ can tell the versions apart.
             versions = []
-            for alt in ranked[1:version_limit]:
-                astem = Path(alt.path).stem
+            for alt in alts:
+                astem = out_stem[alt.path]
                 aext = _playable_ext(alt)
-                if aext is None or astem == stem:  # unplayable or name-collision
-                    continue
                 for exn in alt.file_types:
                     expected[output_root / prefix / artist / f"{astem}.{exn}"] = \
                         Path(alt.path).with_suffix(f".{exn}")
@@ -2873,28 +2972,33 @@ def find_swapped(store: TrackStore) -> None:
     questionary.print(f"with {len(single_tracks)} options")
 
     total_swaps = 0
-    swap_folder : dict[str, list[Track]] = {}
+    swap_folder : dict[Path, list[Track]] = {}   # folder -> one sample per song
+    copies_of: dict[str, list[Track]] = {}        # sample path -> every copy
     for t in single_tracks:
         song_as_artist = clean_artist(t.song)
         artist_as_artist = clean_artist(t.artist)
         if song_as_artist in likely_artists and artist_as_artist not in likely_artists:
-            folder = Path(t.path).parent
-            if folder not in swap_folder:
-                swap_folder[folder] = []
-            swap_folder[folder].append(t)
+            # All copies swap together, or the song is split across two
+            # artists (GH #30). Agreement still counts songs: a song counts
+            # once in each folder holding a copy, however many copies.
+            copies_of[t.path] = index.copies(t)
+            for folder in {Path(c.path).parent for c in copies_of[t.path]}:
+                swap_folder.setdefault(folder, []).append(t)
             total_swaps += 1
 
     questionary.print(f"Available {total_swaps} in {len(swap_folder)}")
 
     total_swaps = 0
+    swapped: set[str] = set()   # a song in two agreeing folders swaps once
     for k, v in swap_folder.items():
         if len(v) > 3:
-            for trk in v:
-                total_swaps += 1
-                old_artist = trk.artist
-                old_song = trk.song
-                trk.song = old_artist
-                trk.artist = old_song
+            for sample in v:
+                for trk in copies_of[sample.path]:
+                    if trk.path in swapped:
+                        continue
+                    swapped.add(trk.path)
+                    total_swaps += 1
+                    trk.artist, trk.song = trk.song, trk.artist
     questionary.print(f"Completed Swaps {total_swaps}")
 
 
@@ -2908,7 +3012,9 @@ def ungroup_artist(store: TrackStore) -> None:
 
     single_tracks = index.single_artists(max_songs=9)
     
-    maybe_groups = [t for t in single_tracks if '&' in t.artist]
+    # any copy spelled with '&' will do: the sampled one may say 'feat.' (GH #30)
+    maybe_groups = [g for g in (next((c for c in index.copies(t) if '&' in c.artist), None)
+                                for t in single_tracks) if g]
     questionary.print(f"with {len(maybe_groups)} options")
 
     # clean form -> most common raw spelling, so the rewrite below can display
@@ -2924,10 +3030,13 @@ def ungroup_artist(store: TrackStore) -> None:
         prefix = uncomma_artist(prefix) or prefix
 
         if prefix in likely_artists:
-            total_swaps += 1
-            t.artist = (raw_of[prefix].most_common(1)[0][0]
-                        if raw_of.get(prefix) else raw_prefix.strip())
-            t.metadata["feature"] = feature.strip()
+            artist = (raw_of[prefix].most_common(1)[0][0]
+                      if raw_of.get(prefix) else raw_prefix.strip())
+            # every copy, or the song is split across two artists (GH #30)
+            for c in index.copies(t):
+                total_swaps += 1
+                c.artist = artist
+                c.metadata["feature"] = feature.strip()
     questionary.print(f"Completed Swaps {total_swaps}")
 
 

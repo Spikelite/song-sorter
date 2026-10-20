@@ -109,6 +109,14 @@ def test_single_artists_returns_one_track_per_song_of_thin_artists() -> None:
     assert [(t.artist, t.song) for t in thin] == [("Bread", "If")]   # one per song
 
 
+def test_copies_finds_every_track_grouped_as_the_same_song() -> None:
+    tracks = [make_track("/b1", "Bread", "If"), make_track("/b2", "BREAD", "If (Karaoke)"),
+              make_track("/b3", "Bread", "Guitar Man"), make_track("/n", "10cc", "Rubber Bullets")]
+    idx = ArtistIndex(tracks)
+    assert {t.path for t in idx.copies(tracks[1])} == {"/b1", "/b2"}
+    assert [t.path for t in idx.copies(tracks[3])] == ["/n"]        # '#' prefix bucket
+
+
 # --- SongIndex -------------------------------------------------------------
 
 def test_song_index_skips_unknown_artists_and_buckets_titles() -> None:
