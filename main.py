@@ -64,6 +64,16 @@ def _save_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+def _saved_version_limit(cfg: dict) -> int:
+    """The remembered copies-per-song limit for Final-final's export (which
+    Key-detect mirrors), at least 1. Shared so both read it the same way: a
+    missing or non-numeric value (a hand-edited config.json) falls back to 1."""
+    try:
+        return max(1, int(cfg.get("version_limit", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _load_aliases() -> dict:
     """The artist alias map (variant -> canonical) from artist-aliases.json;
     {} when the file is absent or unreadable. Shared by Unify, Uncomma, and
@@ -1650,7 +1660,9 @@ def detect_keys(store: TrackStore) -> None:
             "Use online corroboration (MusicBrainz -> AcousticBrainz) to confirm/fill "
             "keys? It reports the original master's key -- advisory only, and never "
             "overrides a confident local read.",
-            default=True).ask() or False
+            default=True).ask()
+        if online_enabled is None:
+            return
     else:
         questionary.print("MusicBrainz unreachable -- offline detection only.")
 
@@ -1663,6 +1675,8 @@ def detect_keys(store: TrackStore) -> None:
     recheck = questionary.confirm(
         "Re-check tracks previously scored none/online/low-confidence?",
         default=False).ask()
+    if recheck is None:
+        return
 
     overrides = _load_key_overrides()
 
@@ -1690,7 +1704,7 @@ def detect_keys(store: TrackStore) -> None:
     # Scope: only copies Final-final exports actually reach index.json, and a
     # karaoke library is heavily duplicated -- keying every copy can be several
     # times the work for no published benefit.
-    version_limit = max(1, int(cfg.get("version_limit", 1) or 1))
+    version_limit = _saved_version_limit(cfg)
     export_only = questionary.confirm(
         f"Key only the copies Final-final exports (best + up to {version_limit} "
         f"per artist+song)? No = key every copy in the store (much slower).",
@@ -1724,8 +1738,11 @@ def detect_keys(store: TrackStore) -> None:
         questionary.print(
             "Faster path for a large library: run offline-only now (parallel, CPU-bound), "
             "then re-run Key-detect with online + re-check to fill just the gaps.")
-        if not questionary.confirm(
-                "Keep online corroboration on for this run?", default=False).ask():
+        keep_online = questionary.confirm(
+            "Keep online corroboration on for this run?", default=False).ask()
+        if keep_online is None:
+            return
+        if not keep_online:
             online_enabled = False
             questionary.print("Online corroboration off for this run.")
 
@@ -2107,13 +2124,9 @@ def tracks_to_keep(store: TrackStore) -> None:
     # How many copies of each song to export (1 = best only, as before). Extra
     # copies become selectable "versions" in the index for players like
     # KriticalDJ. Remembered between runs.
-    try:
-        default_vl = int(cfg.get("version_limit", 1))
-    except (TypeError, ValueError):
-        default_vl = 1
     vl_raw = questionary.text(
         "Max versions to export per song (1 = best only):",
-        default=str(default_vl),
+        default=str(_saved_version_limit(cfg)),
     ).ask()
     if vl_raw is None:
         return
