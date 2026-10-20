@@ -29,6 +29,12 @@ def test_config_unreadable_is_empty(m) -> None:
     assert m._load_config() == {}
 
 
+def test_config_of_the_wrong_shape_is_empty(m) -> None:
+    m._CONFIG_PATH.parent.mkdir(parents=True)
+    m._CONFIG_PATH.write_text(json.dumps(["x"]), encoding="utf-8")
+    assert m._load_config() == {}
+
+
 def test_aliases_drop_blank_and_identity_entries(m) -> None:
     m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
     m._ARTIST_ALIASES_PATH.write_text(json.dumps({"aliases": {
@@ -41,6 +47,20 @@ def test_aliases_missing_or_unreadable(m) -> None:
     m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
     m._ARTIST_ALIASES_PATH.write_text("[", encoding="utf-8")
     assert m._load_aliases() == {}
+
+
+@pytest.mark.parametrize("payload", [[], {"aliases": ["x"]}])
+def test_aliases_of_the_wrong_shape_are_empty(m, payload) -> None:
+    m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
+    m._ARTIST_ALIASES_PATH.write_text(json.dumps(payload), encoding="utf-8")
+    assert m._load_aliases() == {}
+
+
+def test_aliases_drop_entries_that_are_not_names(m) -> None:
+    m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True)
+    m._ARTIST_ALIASES_PATH.write_text(json.dumps({"aliases": {
+        "Jones, Tom": "Tom Jones", "List": ["Tom Jones"], "Number": 7}}), encoding="utf-8")
+    assert m._load_aliases() == {"Jones, Tom": "Tom Jones"}
 
 
 def test_key_overrides_accept_both_shapes_and_normalise_keys(m) -> None:
@@ -57,6 +77,19 @@ def test_key_overrides_missing_or_unreadable(m) -> None:
     m._KEY_OVERRIDES_PATH.parent.mkdir(parents=True)
     m._KEY_OVERRIDES_PATH.write_text("nope", encoding="utf-8")
     assert m._load_key_overrides() == {}
+
+
+def test_key_overrides_of_the_wrong_shape_are_empty(m) -> None:
+    m._KEY_OVERRIDES_PATH.parent.mkdir(parents=True)
+    m._KEY_OVERRIDES_PATH.write_text(json.dumps({"overrides": ["x"]}), encoding="utf-8")
+    assert m._load_key_overrides() == {}
+
+
+def test_key_overrides_drop_entries_that_are_not_key_strings(m) -> None:
+    m._KEY_OVERRIDES_PATH.parent.mkdir(parents=True)
+    m._KEY_OVERRIDES_PATH.write_text(json.dumps(
+        {"version": 1, "A - B": "8A", "C - D": ["Am"]}), encoding="utf-8")
+    assert m._load_key_overrides() == {"a - b": "8A"}
 
 
 def test_default_scan_dir(m, store) -> None:
@@ -236,6 +269,14 @@ def test_format_metadata_defaults(m) -> None:
     assert m._format_metadata({}) == "sec , bitrate 0 m.sz 0k c.sz 0k m#  c# "
 
 
+def test_format_metadata_tolerates_blank_and_non_integer_numbers(m) -> None:
+    assert m._format_metadata({"bitrate_bps": "", "mp3_size": "1.5", "cdg_size": "inf"}) \
+        == "sec , bitrate 0 m.sz 0k c.sz 0k m#  c# "
+    assert m._format_metadata({"bitrate_bps": "128000.0", "mp3_size": "n/a",
+                               "cdg_size": ["junk"]}) \
+        == "sec , bitrate 128 m.sz 0k c.sz 0k m#  c# "
+
+
 # --- refresh_names (Refresh) -----------------------------------------------
 
 def _known(store, artist, n=6):
@@ -283,6 +324,20 @@ def test_refresh_recovers_compact_stems_only_for_unknown_tracks(m, store, tmp_pa
     got = {t.path: (t.artist, t.song) for t in store.all()}
     assert got[str(unk.resolve())] == ("MARY POPPINS", "I LOVE TO LAUGH")
     assert got[str(cur.resolve())] == ("Curated", "Keep")  # never clobbered
+
+
+def test_refresh_counts_catalog_recoveries_as_possible(m, store, tmp_path, capsys) -> None:
+    _known(store, "Abba")
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    cat = lib / "DIS61201-13-MARY POPPINS-I LOVE TO LAUGH.cdg"   # compact catalog stem
+    two = lib / "Abba - Waterloo.zip"                             # two-part stem
+    for p in (cat, two):
+        p.write_bytes(b"c")
+    store.add(make_track(path=str(cat.resolve()), artist="Unknown", song="whole stem"))
+    store.add(make_track(path=str(two.resolve()), artist="?", song="?"))
+    m.refresh_names(store, lib)
+    assert "Modified 2 tracks of 2 possible." in capsys.readouterr().out
 
 
 def test_refresh_skips_three_part_and_unparseable_stems(m, store, tmp_path, capsys) -> None:

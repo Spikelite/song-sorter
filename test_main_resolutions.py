@@ -50,6 +50,31 @@ def test_resolutions_with_no_entries(m, store, prompts) -> None:
     assert "has no entries" in prompts.output
 
 
+@pytest.mark.parametrize("payload", [[{"/a": {"artist": "Abba"}}],
+                                     {"resolutions": [{"/a": {"artist": "Abba"}}]}])
+def test_resolutions_of_the_wrong_shape_are_unreadable(m, store, prompts, payload) -> None:
+    store.add(make_track("/a", "Waterloo", "Abba"))
+    _write(m._RESOLUTIONS_PATH, payload)
+    m.apply_resolutions(store)                        # no dry-run prompt is reached
+    assert "Could not read resolutions" in prompts.output
+    assert store.get("/a").artist == "Waterloo"
+
+
+def test_a_malformed_resolution_entry_is_reported_and_skipped(m, store, prompts) -> None:
+    store.add(make_track("/bad", "Waterloo", "Abba"))
+    store.add(make_track("/good", "Waterloo", "Abba"))
+    _write(m._RESOLUTIONS_PATH, {"resolutions": {
+        "/bad": "Abba - Waterloo",
+        "/good": {"artist": "Abba", "song": "Waterloo"},
+    }})
+    prompts.queue(False)
+    m.apply_resolutions(store)
+    assert "Skipping malformed entry (not an object): /bad" in prompts.output
+    assert (store.get("/bad").artist, store.get("/bad").song) == ("Waterloo", "Abba")
+    assert (store.get("/good").artist, store.get("/good").song) == ("Abba", "Waterloo")
+    assert "Applied 1;" in prompts.output
+
+
 def test_resolutions_dry_run_cancelled(m, store, prompts) -> None:
     store.add(make_track("/a", "Waterloo", "Abba"))
     _write(m._RESOLUTIONS_PATH, {"resolutions": {"/a": {"artist": "Abba", "song": "Waterloo"}}})

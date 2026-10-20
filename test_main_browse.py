@@ -290,3 +290,11 @@ def test_fix_unknown_recovers_every_split_shape(m, store, capsys, prompts) -> No
     assert "candidate: 'Abba' - 'Knowing Me'" in out
     assert "candidate: 'Abba' - 'Knowing Me'  [Knowing Me Abba]" in out
     assert "Success 9" in prompts.output
+
+
+def test_fix_unknown_summary_counts_double_space_stems(m, store, prompts) -> None:
+    _add(store, make_track("/u0", "Unknown", "Foo  Bar"),      # no known artist
+         make_track("/u1", "Unknown", "a  b  c"))               # three parts
+    m.fix_unknown(store)
+    assert "Success 0, simple 0, id 0, Complex 1, Comma 0, Space 1. No Split 0" \
+        in prompts.output

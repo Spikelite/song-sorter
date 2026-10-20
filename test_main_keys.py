@@ -120,15 +120,31 @@ def test_tags_only_run_when_nothing_else_is_available(m, store, prompts, kd, mon
     assert store.get("/a").metadata["key_source"] == "tag"
 
 
-@pytest.mark.parametrize("cancel_at", ["export_only", "workers"])
-def test_cancelling_a_setup_prompt_aborts(m, store, prompts, kd, cancel_at) -> None:
+@pytest.mark.parametrize("answers", [
+    [None],                         # online corroboration?
+    [True, None],                   # re-check?
+    [True, False, None],            # export-only?
+    [True, False, True, None],      # workers
+], ids=["online", "recheck", "export_only", "workers"])
+def test_cancelling_a_setup_prompt_aborts(m, store, prompts, kd, answers) -> None:
     store.add(_t("/a"))
-    if cancel_at == "export_only":
-        prompts.queue(True, False, None)
-    else:
-        prompts.queue(True, False, True, None)
+    prompts.queue(*answers)
     m.detect_keys(store)
     assert "key_source" not in store.get("/a").metadata
+    assert not m._CACHE_PATH.exists()                       # nothing saved
+
+
+def test_a_non_numeric_version_limit_falls_back_to_one(m, store, prompts, kd) -> None:
+    m._save_config({"version_limit": "two"})
+    store.add(_t("/big", mp3_size=900))
+    store.add(_t("/small", mp3_size=100))                   # second copy, same song
+    for p in ("/big", "/small"):
+        kd["local"][p] = {"tag": None, "offline": ("C major", 0.9)}
+    _run(prompts)
+    m.detect_keys(store)
+    assert "best + up to 1 per artist+song" in prompts.asked[2][1]
+    assert store.get("/big").metadata["key"] == "C major"
+    assert "key_source" not in store.get("/small").metadata
 
 
 def test_nothing_to_do(m, store, prompts, kd) -> None:
@@ -277,6 +293,16 @@ def test_large_online_run_can_keep_online_on(m, store, prompts, kd) -> None:
     prompts.queue(True, False, True, True, "1")
     m.detect_keys(store)
     assert len(kd["online_calls"]) == 501
+
+
+def test_cancelling_the_large_run_heads_up_aborts(m, store, prompts, kd) -> None:
+    for i in range(501):
+        store.add(_t(f"/t{i}", song=f"Song {i}"))
+    prompts.queue(True, False, True, None)          # ... keep online on? -> cancelled
+    m.detect_keys(store)
+    assert "Online corroboration off" not in prompts.output
+    assert not any("key_source" in t.metadata for t in store.all())
+    assert not m._CACHE_PATH.exists()
 
 
 def test_long_runs_checkpoint(m, store, prompts, kd, monkeypatch) -> None:
