@@ -287,3 +287,13 @@ def test_ungroup_fixes_every_copy_of_a_song(m, store, prompts) -> None:
     assert not left, f"copies left grouped: {left}"
     assert all(store.get(f"/g/{c}").metadata["feature"] == "Friends" for c in range(3))
     assert "Completed Swaps 3" in prompts.output
+
+
+def test_ungroup_finds_the_group_whichever_copy_is_sampled(m, store, prompts) -> None:
+    """single_artists() samples the first copy by raw name, here the 'feat.'
+    spelling, which has no '&'; another copy's credit must still count."""
+    _many(store, "Abba", 2, "/abba")
+    store.add(make_track("/g/0", "ABBA feat. Friends", "Waterloo"))
+    store.add(make_track("/g/1", "Abba & Friends", "Waterloo"))
+    m.ungroup_artist(store)
+    assert {store.get(p).artist for p in ("/g/0", "/g/1")} == {"Abba"}

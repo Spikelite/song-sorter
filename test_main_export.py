@@ -264,9 +264,9 @@ def test_songs_sharing_a_filename_stem_are_both_exported(m, store, prompts, tmp_
     assert (out / "a/abba/Track 01 (Disc2).zip").read_bytes() == b"second!"
 
 
-def test_a_versions_stem_collision_with_another_song_is_suffixed(m, store, prompts,
-                                                                tmp_path) -> None:
-    """An alternate copy can collide with a different song's best copy too."""
+def test_versions_never_rename_another_songs_best_copy(m, store, prompts, tmp_path) -> None:
+    """Best copies are named first, so raising the version limit cannot move
+    SOS's main file (and its index path) out from under a player."""
     store.add(_src(tmp_path, "Best/Waterloo.zip", b"best waterloo", song="Waterloo"))
     store.add(_src(tmp_path, "Alt/Track 01.zip", b"alt", song="Waterloo"))
     store.add(_src(tmp_path, "Disc1/Track 01.zip", b"sos!", song="SOS"))
@@ -274,34 +274,81 @@ def test_a_versions_stem_collision_with_another_song_is_suffixed(m, store, promp
     _export(m, prompts, out, versions="2")
     m.tracks_to_keep(store)
     entries = {e["title"]: e for e in _index(out)}
-    assert entries["Waterloo"]["versions"][0]["path"] == "a/abba/Track 01.zip"
-    assert entries["SOS"]["path"] == "a/abba/Track 01 (Disc1).zip"
-    assert (out / "a/abba/Track 01 (Disc1).zip").read_bytes() == b"sos!"
+    assert entries["SOS"]["path"] == "a/abba/Track 01.zip"
+    assert entries["Waterloo"]["versions"][0]["path"] == "a/abba/Track 01 (Alt).zip"
+    assert (out / "a/abba/Track 01.zip").read_bytes() == b"sos!"
+
+
+def test_a_case_only_alternate_never_takes_its_best_copys_name(m, store, prompts,
+                                                               tmp_path) -> None:
+    store.add(_src(tmp_path, "b/Waterloo.zip", b"the best one"))
+    store.add(_src(tmp_path, "a/WATERLOO.zip", b"alt"))
+    out = tmp_path / "out"
+    _export(m, prompts, out, versions="2")
+    m.tracks_to_keep(store)
+    [entry] = _index(out)
+    assert entry["path"] == "a/abba/Waterloo.zip"
+    assert entry["versions"][0]["path"] == "a/abba/WATERLOO (a).zip"
 
 
 # --- _export_stems ----------------------------------------------------------
 
+def _claims(*specs):
+    """(folder, path, file types, is best) -> _export_stems claims."""
+    return [(f, make_track(p, file_types=types), best) for f, p, types, best in specs]
+
+
 def test_export_stems_leave_non_colliding_names_alone(m) -> None:
-    a, b = make_track("/x/A - One.zip"), make_track("/y/A - Two.zip")
-    assert m._export_stems([("a/a", a), ("a/a", b)]) ==         {"/x/A - One.zip": "A - One", "/y/A - Two.zip": "A - Two"}
+    assert m._export_stems(_claims(("a/a", "/x/A - One.zip", ("zip",), True),
+                                   ("a/a", "/y/A - Two.zip", ("zip",), True))) ==         {"/x/A - One.zip": "A - One", "/y/A - Two.zip": "A - Two"}
 
 
 def test_export_stems_only_collide_within_one_folder(m) -> None:
-    a, b = make_track("/x/Track 01.zip"), make_track("/y/Track 01.zip")
-    assert set(m._export_stems([("a/abba", a), ("b/bee gees", b)]).values()) == {"Track 01"}
+    stems = m._export_stems(_claims(("a/abba", "/x/Track 01.zip", ("zip",), True),
+                                    ("b/bee gees", "/y/Track 01.zip", ("zip",), True)))
+    assert set(stems.values()) == {"Track 01"}
+
+
+def test_export_stems_collide_on_files_not_stems(m) -> None:
+    """A zip and an mp3+cdg pair write different files: no collision, as before."""
+    stems = m._export_stems(_claims(("f", "/b/Track 01.cdg", ("mp3", "cdg"), True),
+                                    ("f", "/a/Track 01.zip", ("zip",), True)))
+    assert set(stems.values()) == {"Track 01"}
+
+
+def test_export_stems_keep_one_songs_mp3_from_anothers_cdg(m) -> None:
+    """Players pair .mp3 and .cdg by stem, so they collide across songs."""
+    stems = m._export_stems(_claims(("f", "/a/Track 01.mp3", ("mp3",), True),
+                                    ("f", "/b/Track 01.cdg", ("cdg",), True)))
+    assert stems == {"/a/Track 01.mp3": "Track 01", "/b/Track 01.cdg": "Track 01 (b)"}
+
+
+def test_export_stems_name_playable_best_copies_first(m) -> None:
+    """A cdg-only best copy gets no index entry, so it must not push a
+    playable song off its name, whatever the path order says."""
+    stems = m._export_stems(_claims(("f", "/a/Track 01.cdg", ("cdg",), True),
+                                    ("f", "/b/Track 01.mp3", ("mp3",), True)))
+    assert stems == {"/b/Track 01.mp3": "Track 01", "/a/Track 01.cdg": "Track 01 (a)"}
+
+
+def test_export_stems_name_best_copies_before_alternates(m) -> None:
+    stems = m._export_stems(_claims(("f", "/a/Track 01.zip", ("zip",), False),
+                                    ("f", "/b/Track 01.zip", ("zip",), True)))
+    assert stems == {"/b/Track 01.zip": "Track 01", "/a/Track 01.zip": "Track 01 (a)"}
 
 
 def test_export_stems_are_settled_by_source_path_not_claim_order(m) -> None:
-    a, b = make_track("/d1/Track 01.zip"), make_track("/d2/Track 01.zip")
+    a = ("f", "/d1/Track 01.zip", ("zip",), True)
+    b = ("f", "/d2/Track 01.zip", ("zip",), True)
     want = {"/d1/Track 01.zip": "Track 01", "/d2/Track 01.zip": "Track 01 (d2)"}
-    assert m._export_stems([("f", a), ("f", b)]) == want
-    assert m._export_stems([("f", b), ("f", a)]) == want
+    assert m._export_stems(_claims(a, b)) == want
+    assert m._export_stems(_claims(b, a)) == want
 
 
 def test_export_stems_compare_case_insensitively_and_count_past_taken_labels(m) -> None:
-    claims = [("f", make_track(p)) for p in
-              ("/a/disc/Track 01.zip", "/b/disc/track 01.zip",
-               "/c/disc/TRACK 01.zip", "/d/Track 01 (disc).zip")]
+    claims = _claims(*[("f", p, ("zip",), True) for p in
+                       ("/a/disc/Track 01.zip", "/b/disc/track 01.zip",
+                        "/c/disc/TRACK 01.zip", "/d/Track 01 (disc).zip")])
     assert m._export_stems(claims) == {
         "/a/disc/Track 01.zip": "Track 01",
         "/d/Track 01 (disc).zip": "Track 01 (disc)",     # a real stem, claimed first
@@ -311,8 +358,9 @@ def test_export_stems_compare_case_insensitively_and_count_past_taken_labels(m) 
 
 
 def test_export_stems_label_a_copy_at_the_filesystem_root(m) -> None:
-    a, b = make_track("/A/Song.zip"), make_track("/Song.zip")     # '/A' sorts first
-    assert m._export_stems([("f", a), ("f", b)])["/Song.zip"] == "Song (Alternate)"
+    stems = m._export_stems(_claims(("f", "/A/Song.zip", ("zip",), True),   # '/A' sorts first
+                                    ("f", "/Song.zip", ("zip",), True)))
+    assert stems["/Song.zip"] == "Song (Alternate)"
 
 
 # --- songbook ---------------------------------------------------------------

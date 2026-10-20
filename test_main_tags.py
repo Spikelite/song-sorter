@@ -48,6 +48,15 @@ def test_auto_clean_artist(m, raw, want) -> None:
     assert m._auto_clean_artist(raw, _KNOWN) == want
 
 
+def test_auto_clean_artist_splits_a_known_primary_it_cannot_flip(m) -> None:
+    """'Beatles, The' is trailing-article's job, so uncomma_artist refuses it;
+    known as written, the credit still splits (it did before GH #25's fix)."""
+    from track_index import clean_artist
+    known = {clean_artist("Beatles, The")}
+    assert m._auto_clean_artist("Beatles, The feat. Billy Preston", known) ==         ("Beatles, The", "Billy Preston")
+    assert m._auto_clean_artist("Beatles, The & Friends", set()) ==         ("Beatles, The & Friends", None)
+
+
 def test_auto_clean_artist_needs_corroboration_to_uncomma_a_split_primary(m) -> None:
     """Without a known 'Tom Jones' the split primary could equally be a band
     fragment, so the credit is left whole rather than half-cleaned."""
