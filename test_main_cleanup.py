@@ -193,42 +193,66 @@ def test_fuzz_song_breaks_ties_deterministically(m, store, prompts) -> None:
 
 # --- find_swapped (Unswap) --------------------------------------------------
 
-def _reversed(store, folder, n, known="Avril Lavigne", copies=1):
+def _reversed(store, folder, n, known="Avril Lavigne", copies=1, title="Title"):
     """n reversed tracks in one folder: artist = a title, song = a known artist."""
     for i in range(n):
         for c in range(copies):
-            store.add(make_track(f"/{folder}/{i}-{c}.zip", f"Title {i}", known))
+            store.add(make_track(f"/{folder}/{i}-{c}.zip", f"{title} {i}", known))
 
 
 def test_unswap_applies_when_enough_tracks_in_a_folder_agree(m, store, prompts) -> None:
     _many(store, "Avril Lavigne", 6, "/k")
     _reversed(store, "disc", 5)
-    _reversed(store, "few", 2)                                      # too few: left alone
+    _reversed(store, "few", 2, title="Other")                       # too few: left alone
     m.find_swapped(store)
     disc = [t for t in store.all() if t.path.startswith("/disc/")]
     assert all(t.artist == "Avril Lavigne" for t in disc)
-    assert all(t.artist.startswith("Title") for t in store.all() if t.path.startswith("/few/"))
+    assert all(t.artist.startswith("Other") for t in store.all() if t.path.startswith("/few/"))
     assert "Completed Swaps 5" in prompts.output
 
 
-@pytest.mark.xfail(strict=True, reason="GH #29: README promises Unswap applies where "
-                   ">=3 tracks in a folder agree, but the code requires > 3 (i.e. >= 4)")
-def test_unswap_threshold_matches_the_documented_three(m, store, prompts) -> None:
+@pytest.mark.parametrize("n, swapped", [(3, False), (4, True)])
+def test_unswap_needs_four_agreeing_songs_in_a_folder(m, store, prompts, n, swapped) -> None:
+    """GH #29: the threshold is the documented 4+ (the README said 3)."""
     _many(store, "Avril Lavigne", 6, "/k")
-    _reversed(store, "disc", 3)
+    _reversed(store, "disc", n)
     m.find_swapped(store)
-    assert all(t.artist == "Avril Lavigne" for t in store.all() if t.path.startswith("/disc/"))
+    disc = [t for t in store.all() if t.path.startswith("/disc/")]
+    assert all((t.artist == "Avril Lavigne") == swapped for t in disc)
 
 
-@pytest.mark.xfail(strict=True, reason="GH #30: Unswap works from single_artists(), which "
-                   "yields ONE copy per song, so duplicate copies are left reversed")
 def test_unswap_fixes_every_copy_of_a_song(m, store, prompts) -> None:
+    """GH #30: only the one copy single_artists() samples was swapped, so the
+    song ended up split across two artists."""
     _many(store, "Avril Lavigne", 6, "/k")
     _reversed(store, "disc", 5, copies=2)
     m.find_swapped(store)
     left = [t.path for t in store.all()
             if t.path.startswith("/disc/") and t.artist != "Avril Lavigne"]
     assert not left, f"copies left reversed: {left}"
+    assert "Completed Swaps 10" in prompts.output
+
+
+def test_unswap_counts_songs_not_copies_toward_agreement(m, store, prompts) -> None:
+    """Three songs with two copies each are still three agreeing songs."""
+    _many(store, "Avril Lavigne", 6, "/k")
+    _reversed(store, "disc", 3, copies=2)
+    m.find_swapped(store)
+    assert all(t.artist.startswith("Title") for t in store.all() if t.path.startswith("/disc/"))
+
+
+def test_unswap_carries_copies_in_other_folders_and_swaps_each_once(m, store, prompts) -> None:
+    """A song in two agreeing folders must not be swapped there and back, and
+    its copy in a folder that does not agree on its own moves with it."""
+    _many(store, "Avril Lavigne", 6, "/k")
+    _reversed(store, "d1", 4)
+    for i in range(4):
+        store.add(make_track(f"/d2/{i}.zip", f"Title {i}", "Avril Lavigne"))
+    store.add(make_track("/lone/0.zip", "Title 0", "Avril Lavigne"))
+    m.find_swapped(store)
+    moved = [t for t in store.all() if not t.path.startswith("/k")]
+    assert all(t.artist == "Avril Lavigne" for t in moved)
+    assert "Completed Swaps 9" in prompts.output
 
 
 # --- ungroup_artist (Ungroup) -----------------------------------------------
@@ -253,12 +277,13 @@ def test_ungroup_never_inverts_a_comma_band(m, store, prompts) -> None:
     assert all(t.artist == "Earth, Wind & Fire" for t in store.all())
 
 
-@pytest.mark.xfail(strict=True, reason="GH #30: Ungroup works from single_artists(), which "
-                   "yields ONE copy per song, so duplicate copies keep the group credit")
 def test_ungroup_fixes_every_copy_of_a_song(m, store, prompts) -> None:
+    """GH #30: only the sampled copy was ungrouped, splitting the song."""
     _many(store, "Abba", 2, "/abba")
     for c in range(3):
         store.add(make_track(f"/g/{c}", "Abba & Friends", "Waterloo"))
     m.ungroup_artist(store)
     left = [t.path for t in store.all() if t.artist == "Abba & Friends"]
     assert not left, f"copies left grouped: {left}"
+    assert all(store.get(f"/g/{c}").metadata["feature"] == "Friends" for c in range(3))
+    assert "Completed Swaps 3" in prompts.output

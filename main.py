@@ -1461,7 +1461,7 @@ def review_mode(store: TrackStore) -> None:
         questionary.print("No tracks from artists with 5 or fewer tracks.")
         return
 
-    # For the swapped-track warning: artists with >=3 tracks are "known".
+    # For the swapped-track warning: artists with more than 3 tracks are "known".
     known_artists = set(ArtistIndex.from_store(store).count_artists(low_bound=3))
     # corroboration for auto-clean's uncomma (GH #25): a wider net than the
     # warning above, matching the Uncomma pass
@@ -2911,28 +2911,33 @@ def find_swapped(store: TrackStore) -> None:
     questionary.print(f"with {len(single_tracks)} options")
 
     total_swaps = 0
-    swap_folder : dict[str, list[Track]] = {}
+    swap_folder : dict[Path, list[Track]] = {}   # folder -> one sample per song
+    copies_of: dict[str, list[Track]] = {}        # sample path -> every copy
     for t in single_tracks:
         song_as_artist = clean_artist(t.song)
         artist_as_artist = clean_artist(t.artist)
         if song_as_artist in likely_artists and artist_as_artist not in likely_artists:
-            folder = Path(t.path).parent
-            if folder not in swap_folder:
-                swap_folder[folder] = []
-            swap_folder[folder].append(t)
+            # All copies swap together, or the song is split across two
+            # artists (GH #30). Agreement still counts songs: a song counts
+            # once in each folder holding a copy, however many copies.
+            copies_of[t.path] = index.copies(t)
+            for folder in {Path(c.path).parent for c in copies_of[t.path]}:
+                swap_folder.setdefault(folder, []).append(t)
             total_swaps += 1
 
     questionary.print(f"Available {total_swaps} in {len(swap_folder)}")
 
     total_swaps = 0
+    swapped: set[str] = set()   # a song in two agreeing folders swaps once
     for k, v in swap_folder.items():
         if len(v) > 3:
-            for trk in v:
-                total_swaps += 1
-                old_artist = trk.artist
-                old_song = trk.song
-                trk.song = old_artist
-                trk.artist = old_song
+            for sample in v:
+                for trk in copies_of[sample.path]:
+                    if trk.path in swapped:
+                        continue
+                    swapped.add(trk.path)
+                    total_swaps += 1
+                    trk.artist, trk.song = trk.song, trk.artist
     questionary.print(f"Completed Swaps {total_swaps}")
 
 
@@ -2962,10 +2967,13 @@ def ungroup_artist(store: TrackStore) -> None:
         prefix = uncomma_artist(prefix) or prefix
 
         if prefix in likely_artists:
-            total_swaps += 1
-            t.artist = (raw_of[prefix].most_common(1)[0][0]
-                        if raw_of.get(prefix) else raw_prefix.strip())
-            t.metadata["feature"] = feature.strip()
+            artist = (raw_of[prefix].most_common(1)[0][0]
+                      if raw_of.get(prefix) else raw_prefix.strip())
+            # every copy, or the song is split across two artists (GH #30)
+            for c in index.copies(t):
+                total_swaps += 1
+                c.artist = artist
+                c.metadata["feature"] = feature.strip()
     questionary.print(f"Completed Swaps {total_swaps}")
 
 
