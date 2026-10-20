@@ -501,7 +501,11 @@ def _bulk_edit_artist(store: TrackStore, node: IndexNode) -> None:
                 store.add(t)
     elif result == "uncomma":
         # raw-preserving: never write clean_artist output as a display name
-        prefix, feature = _auto_clean_artist(first_artist)
+        prefix, feature = _auto_clean_artist(first_artist, _known_clean_artists(store))
+        if prefix == first_artist and not feature:
+            questionary.print(f"Left [{first_artist}] as is: no known artist "
+                              "corroborates splitting or uncomma-ing it.")
+            return
 
         for t in all_tracks:
             print(f"Changing {t.artist} to {prefix}")
@@ -797,15 +801,34 @@ def _tracks_to_review(store: TrackStore, review_state: ReviewState) -> list[Trac
     return tracks
 
 
-def _auto_clean_artist(artist: str) -> tuple[str, str | None]:
+def _known_clean_artists(store: TrackStore) -> set[str]:
+    """Clean names the library or the alias map vouches for: the same
+    corroboration the Uncomma pass (standard_artist) relies on."""
+    known = set(ArtistIndex.from_store(store).count_artists())
+    known.update(clean_artist(v) for v in _load_aliases().values())
+    return known
+
+
+def _auto_clean_artist(artist: str, known: set[str]) -> tuple[str, str | None]:
     """Split a credit into (primary artist, feature) and uncomma the primary,
     PRESERVING raw casing -- the old version returned clean_artist output,
-    which put lowercased display names into the library."""
+    which put lowercased display names into the library.
+
+    A 'Last, First' primary split off a credit is only uncomma'd when the
+    flipped name is in `known` (clean_artist forms, see _known_clean_artists).
+    Once '& Fire' is split off, 'Earth, Wind' looks exactly like a person, so
+    uncomma_artist's band guard can't see it (GH #25). Uncorroborated, the
+    credit is returned whole: splitting it alone would still rename the band."""
     raw = re.sub(r"\s+(?:with|and|feat\.?|f\.|ft\.?|featuring)\s+", " & ",
                  artist, flags=re.IGNORECASE)
     if "&" in raw:
         prefix, feature = raw.split("&", 1)
         prefix, feature = prefix.strip(), feature.strip()
+        if "," in prefix:
+            flipped = uncomma_artist(prefix)
+            if flipped is None or clean_artist(flipped) not in known:
+                return artist.strip(), None
+            return flipped, feature
     else:
         prefix, feature = raw.strip(), None
     prefix = uncomma_artist(prefix) or prefix
@@ -1440,6 +1463,9 @@ def review_mode(store: TrackStore) -> None:
 
     # For the swapped-track warning: artists with >=3 tracks are "known".
     known_artists = set(ArtistIndex.from_store(store).count_artists(low_bound=3))
+    # corroboration for auto-clean's uncomma (GH #25): a wider net than the
+    # warning above, matching the Uncomma pass
+    clean_known = _known_clean_artists(store)
 
     session_cache: dict[str, str] = {}
 
@@ -1475,8 +1501,9 @@ def review_mode(store: TrackStore) -> None:
             extra = []
             art_clean = clean_artist(track.artist)
             if '&' in art_clean or ',' in art_clean:
-                prefix, feature = _auto_clean_artist(track.artist)
-                extra.append(Choice(f"auto [{prefix}]", value="auto-clean"))
+                prefix, feature = _auto_clean_artist(track.artist, clean_known)
+                if prefix != track.artist or feature:
+                    extra.append(Choice(f"auto [{prefix}]", value="auto-clean"))
             mb_artist = track.metadata.get("mb_artist")
             mb_title = track.metadata.get("mb_title", "")
             if mb_artist:
@@ -1546,7 +1573,7 @@ def review_mode(store: TrackStore) -> None:
             track.artist, track.song = track.song, track.artist
             store.add(track)  # stay on this track
         elif result == "auto-clean":
-            prefix, feature = _auto_clean_artist(track.artist)
+            prefix, feature = _auto_clean_artist(track.artist, clean_known)
             track.artist = prefix
             if feature:
                 track.metadata["feature"] = feature.strip()

@@ -31,6 +31,9 @@ def _review(m):
 
 # --- _auto_clean_artist ----------------------------------------------------
 
+_KNOWN = {"tom jones"}   # clean_artist forms, as _known_clean_artists builds them
+
+
 @pytest.mark.parametrize("raw, want", [
     ("Abba", ("Abba", None)),
     ("Abba & Friends", ("Abba", "Friends")),
@@ -38,20 +41,36 @@ def _review(m):
     ("Abba FT Friends", ("Abba", "Friends")),
     ("Abba featuring Friends", ("Abba", "Friends")),
     ("Abba With Friends", ("Abba", "Friends")),
-    ("Jones, Tom and Friends", ("Tom Jones", "Friends")),     # uncomma'd primary
+    ("Jones, Tom and Friends", ("Tom Jones", "Friends")),     # corroborated uncomma
+    ("Jones, Tom", ("Tom Jones", None)),                      # whole name: guard sees it all
 ])
 def test_auto_clean_artist(m, raw, want) -> None:
-    assert m._auto_clean_artist(raw) == want
+    assert m._auto_clean_artist(raw, _KNOWN) == want
 
 
-@pytest.mark.xfail(strict=True, reason="GH #25: comma band names are inverted "
-                   "('Earth, Wind & Fire' -> 'Wind Earth') because the credit is "
-                   "split on '&' before uncomma_artist can see the band guard")
+def test_auto_clean_artist_needs_corroboration_to_uncomma_a_split_primary(m) -> None:
+    """Without a known 'Tom Jones' the split primary could equally be a band
+    fragment, so the credit is left whole rather than half-cleaned."""
+    assert m._auto_clean_artist("Jones, Tom & Friends", set()) == ("Jones, Tom & Friends", None)
+
+
 @pytest.mark.parametrize("band", ["Earth, Wind & Fire", "Crosby, Stills & Nash",
                                   "Blood, Sweat & Tears", "Peter, Paul & Mary"])
 def test_auto_clean_artist_leaves_comma_band_names_intact(m, band) -> None:
-    primary, _feature = m._auto_clean_artist(band)
-    assert primary != " ".join(reversed(band.split("&")[0].replace(",", "").split()))
+    """GH #25: splitting on '&' first hid the band from uncomma_artist's guard,
+    so 'Earth, Wind & Fire' came back as ('Wind Earth', 'Fire')."""
+    assert m._auto_clean_artist(band, _KNOWN) == (band, None)
+
+
+def test_known_clean_artists_covers_the_library_and_the_alias_map(m, store) -> None:
+    import json
+    for i in range(2):
+        store.add(make_track(f"/tj{i}", "Tom Jones", f"Hit {i}"))
+    store.add(make_track("/once", "One Hit Wonder", "Hit"))   # 1 track: not vouched for
+    m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    m._ARTIST_ALIASES_PATH.write_text(
+        json.dumps({"aliases": {"Dion, C.": "Celine Dion"}}), encoding="utf-8")
+    assert m._known_clean_artists(store) == {"tom jones", "celine dion"}
 
 
 # --- _artist_tokens --------------------------------------------------------

@@ -83,7 +83,17 @@ def test_edit_delegates_then_stays(m, store, prompts) -> None:
     assert t.song == "Waterloo"
 
 
+def _alias_tom_jones(m):
+    """Vouch for 'Tom Jones' through the alias map, which (unlike extra Tom
+    Jones tracks) adds nothing to the review queue."""
+    import json
+    m._ARTIST_ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    m._ARTIST_ALIASES_PATH.write_text(
+        json.dumps({"aliases": {"Jones, T.": "Tom Jones"}}), encoding="utf-8")
+
+
 def test_auto_clean_splits_the_feature(m, store, prompts) -> None:
+    _alias_tom_jones(m)
     t = make_track("/a", "Jones, Tom & Friends", "Delilah")
     store.add(t)
     seen = []
@@ -101,6 +111,18 @@ def test_auto_clean_without_a_feature(m, store, prompts) -> None:
     m.review_mode(store)
     assert t.artist == "Tom Jones"
     assert "feature" not in t.metadata
+
+
+def test_auto_clean_is_not_offered_for_a_comma_band(m, store, prompts) -> None:
+    """GH #25: auto would have offered 'Wind Earth'. Uncorroborated, it would
+    change nothing, so it is not offered at all."""
+    t = make_track("/a", "Earth, Wind & Fire", "September")
+    store.add(t)
+    seen = []
+    prompts.queue(offered(seen, "ok"))
+    m.review_mode(store)
+    assert not any(c.startswith("auto [") for c in seen[0])
+    assert t.artist == "Earth, Wind & Fire"
 
 
 def test_swapped_parse_warning(m, store, prompts) -> None:
